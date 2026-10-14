@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1360" height="850" viewBox="0 0 1360 850" role="img" aria-label="采集与查询的数据流">
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#507465"/></marker></defs>
+<style>text { font-family: 'Microsoft YaHei','Noto Sans CJK SC',sans-serif; fill: #203e34; } .title { font-size: 30px; font-weight: 700; } .node { font-size: 23px; font-weight: 700; } .body { font-size: 18px; fill: #50665d; } .label { font-size: 16px; fill: #577165; }</style>
+<rect width="100%" height="100%" fill="#f7f9f5"/>
+<text x="44" y="56" class="title">采集与查询的数据流</text>
+<text x="44" y="89" class="body">采集在本机执行；页面查询与导出读取已经保存的结果。</text>
+<rect x="26" y="118" width="1008" height="690" rx="18" fill="none" stroke="#cbd8ce" stroke-dasharray="7 6"/>
+<text x="48" y="145" class="label">本机工作台</text>
+<rect x="54" y="180" width="270" height="132" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="78" y="219" class="node">操作页面</text>
+<text x="78" y="254" class="body">视频链接 / 公开抖音号</text>
+<text x="78" y="282" class="body">数量、时间与筛选条件</text>
+<rect x="384" y="180" width="280" height="132" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="408" y="219" class="node">本地服务</text>
+<text x="408" y="254" class="body">FastAPI · 任务与状态</text>
+<text x="408" y="282" class="body">启动 / 停止 / 继续</text>
+<rect x="724" y="180" width="280" height="132" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="748" y="219" class="node">采集进程</text>
+<text x="748" y="254" class="body">worker · 运行时适配</text>
+<text x="748" y="282" class="body">调用主引擎生命周期</text>
+<path d="M324 246 H384" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M664 246 H724" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<rect x="384" y="390" width="280" height="156" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="408" y="429" class="node">专用 Chrome</text>
+<text x="408" y="464" class="body">扫码登录 / 人工验证</text>
+<text x="408" y="492" class="body">独立资料目录</text>
+<text x="408" y="520" class="body">不同任务复用窗口</text>
+<rect x="724" y="390" width="280" height="156" rx="12" fill="#e5efe7" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="748" y="429" class="node">MediaCrawler</text>
+<text x="748" y="464" class="body">DouYinCrawler / 客户端</text>
+<text x="748" y="492" class="body">评论、喜欢、推荐扩展</text>
+<text x="748" y="520" class="body">共享请求控制</text>
+<rect x="1090" y="390" width="240" height="156" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="1114" y="429" class="node">抖音接口</text>
+<text x="1114" y="464" class="body">可访问的评论与回复</text>
+<text x="1114" y="492" class="body">公开列表 / 作者资料</text>
+<path d="M524 312 V390" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="575" y="360" text-anchor="middle" class="label">管理窗口</text>
+<path d="M864 312 V390" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="917" y="360" text-anchor="middle" class="label">启动内核</text>
+<path d="M664 468 H724" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="694" y="450" text-anchor="middle" class="label">CDP</text>
+<path d="M1004 468 H1090" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="1047" y="450" text-anchor="middle" class="label">请求</text>
+<rect x="724" y="626" width="280" height="132" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="748" y="665" class="node">逐页保存</text>
+<text x="748" y="700" class="body">字段归一、去重</text>
+<text x="748" y="728" class="body">数据与游标原子提交</text>
+<rect x="384" y="626" width="280" height="132" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="408" y="665" class="node">SQLite</text>
+<text x="408" y="700" class="body">评论 / 视频 / 作者</text>
+<text x="408" y="728" class="body">任务状态与分页断点</text>
+<rect x="54" y="626" width="270" height="132" rx="12" fill="#ffffff" stroke="#c5d4ca" stroke-width="1.5"/>
+<text x="78" y="665" class="node">搜索与 TXT 导出</text>
+<text x="78" y="700" class="body">读取全部匹配结果</text>
+<text x="78" y="728" class="body">原文展示，按约定排序</text>
+<path d="M864 546 V626" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="920" y="593" text-anchor="middle" class="label">分页回调</text>
+<path d="M724 692 H664" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M384 692 H324" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<path d="M189 626 V312" fill="none" stroke="#507465" stroke-width="2" marker-end="url(#arrow)"/>
+<text x="250" y="473" text-anchor="middle" class="label">查询 / 展示</text>
+<text x="1090" y="603" class="label">请求策略</text><text x="1090" y="635" class="body">单并发 · 随机间隔</text><text x="1090" y="663" class="body">失败退避 · 限流冷却</text><text x="1090" y="691" class="body">人机验证时暂停</text>
+</svg>

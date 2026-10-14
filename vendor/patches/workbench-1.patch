@@ -1,0 +1,351 @@
+--- a/media_platform/douyin/client.py
++++ b/media_platform/douyin/client.py
+@@ -81,7 +81,7 @@
+         # Initialize proxy pool (from ProxyRefreshMixin)
+         self.init_proxy_pool(proxy_ip_pool)
+ 
+-    async def __process_req_params(
++    async def prepare_request(
+         self,
+         uri: str,
+         params: Optional[Dict] = None,
+@@ -130,8 +130,14 @@
+             post_data = params
+ 
+         if "/v1/web/general/search" not in uri:
+-            a_bogus = await get_a_bogus(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
++            signer = getattr(self, 'signer', None) or get_a_bogus
++            a_bogus = await signer(uri, query_string, post_data, headers["User-Agent"], self.playwright_page)
+             params["a_bogus"] = a_bogus
++
++    async def get_activity_all_videos(self, fetch_page, page_hooks):
++        """Explicit extension for favorite/profile-recommendation cursor chains."""
++        from .pagination import collect_pages
++        return await collect_pages(fetch_page, page_hooks)
+ 
+     async def request(self, method, url, **kwargs):
+         # Check whether the proxy has expired before each request
+@@ -151,12 +157,12 @@
+         """
+         GET请求
+         """
+-        await self.__process_req_params(uri, params, headers)
++        await self.prepare_request(uri, params, headers)
+         headers = headers or self.headers
+         return await self.request(method="GET", url=f"{self._host}{uri}", params=params, headers=headers)
+ 
+     async def post(self, uri: str, data: dict, headers: Optional[Dict] = None):
+-        await self.__process_req_params(uri, data, headers)
++        await self.prepare_request(uri, data, headers, request_method="POST")
+         headers = headers or self.headers
+         return await self.request(method="POST", url=f"{self._host}{uri}", data=data, headers=headers)
+ 
+@@ -282,6 +288,7 @@
+         is_fetch_sub_comments=False,
+         callback: Optional[Callable] = None,
+         max_count: int = 10,
++        *, page_hooks=None, parent_id: str = "",
+     ):
+         """
+         获取帖子的所有评论，包括子评论
+@@ -292,6 +299,10 @@
+         :param max_count: 一次帖子爬取的最大评论数量
+         :return: 评论列表
+         """
++        if page_hooks is not None:
++            from .pagination import collect_pages
++            fetch = (lambda cursor: self.get_sub_comments(aweme_id, parent_id, cursor)) if parent_id else (lambda cursor: self.get_aweme_comments(aweme_id, cursor))
++            return await collect_pages(fetch, page_hooks)
+         result = []
+         comments_has_more = 1
+         comments_cursor = 0
+--- a/media_platform/douyin/core.py
++++ b/media_platform/douyin/core.py
+@@ -17,6 +17,8 @@
+ # 详细许可条款请参阅项目根目录下的LICENSE文件。
+ # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
+ 
++from __future__ import annotations
++
+ import asyncio
+ import os
+ import random
+@@ -33,9 +35,7 @@
+ 
+ import config
+ from base.base_crawler import AbstractCrawler
+-from media_downloader import MediaDownloader
+ from proxy.proxy_ip_pool import IpInfoModel, create_ip_pool
+-from store import douyin as douyin_store
+ from tools import utils
+ from tools.cdp_browser import CDPBrowserManager
+ from var import crawler_type_var, source_keyword_var
+@@ -54,7 +54,8 @@
+     browser_context: BrowserContext
+     cdp_manager: Optional[CDPBrowserManager]
+ 
+-    def __init__(self) -> None:
++    def __init__(self, *, runtime=None) -> None:
++        self.runtime = runtime
+         self.index_url = "https://www.douyin.com"
+         self.cookie_urls = [
+             "https://douyin.com",
+@@ -68,6 +69,23 @@
+         self._media_downloader: Optional[MediaDownloader] = None
+ 
+     async def start(self) -> None:
++        if self.runtime is not None:
++            # Explicit embedding lifecycle. The runtime supplies transport and
++            # storage, while this engine owns login and extension dispatch.
++            async with self.runtime.open_transport() as transport:
++                self.browser_context = transport.context
++                self.context_page = transport.page
++                self.dy_client = transport.client
++                login = DouYinLogin('qrcode', self.browser_context, self.context_page,
++                                   manual_login=transport.wait_for_login)
++                await login.begin()
++                await self.runtime.ready(self, transport)
++                extension = self.runtime.create_extension(self, transport)
++                if extension is not None:
++                    await extension.run(self.runtime.verify_only)
++            return
++        from store import douyin as douyin_store
++        self.store = douyin_store
+         playwright_proxy_format, httpx_proxy_format = None, None
+         if config.ENABLE_IP_PROXY:
+             self.ip_proxy_pool = await create_ip_pool(config.IP_PROXY_POOL_COUNT, enable_validate_ip=True)
+@@ -126,6 +144,9 @@
+                 await self.get_creators_and_videos()
+ 
+             utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
++
++    async def collect_activity(self, fetch_page, page_hooks):
++        return await self.dy_client.get_activity_all_videos(fetch_page, page_hooks)
+ 
+     async def search(self) -> None:
+         utils.logger.info("[DouYinCrawler.search] Begin search douyin keywords")
+@@ -172,7 +193,7 @@
+                         continue
+                     aweme_list.append(aweme_info.get("aweme_id", ""))
+                     page_aweme_list.append(aweme_info.get("aweme_id", ""))
+-                    await douyin_store.update_douyin_aweme(aweme_item=aweme_info)
++                    await self.store.update_douyin_aweme(aweme_item=aweme_info)
+                     await self.download_media(aweme_item=aweme_info)
+                 
+                 # Batch get note comments for the current page
+@@ -214,7 +235,7 @@
+         aweme_details = await asyncio.gather(*task_list)
+         for aweme_detail in aweme_details:
+             if aweme_detail is not None:
+-                await douyin_store.update_douyin_aweme(aweme_item=aweme_detail)
++                await self.store.update_douyin_aweme(aweme_item=aweme_detail)
+                 await self.download_media(aweme_item=aweme_detail)
+         await self.batch_get_note_comments(aweme_id_list)
+ 
+@@ -250,7 +271,9 @@
+         if len(task_list) > 0:
+             await asyncio.wait(task_list)
+ 
+-    async def get_comments(self, aweme_id: str, semaphore: asyncio.Semaphore) -> None:
++    async def get_comments(self, aweme_id: str, semaphore: asyncio.Semaphore = None, *, page_hooks=None, parent_id="") -> None:
++        if page_hooks is not None:
++            return await self.dy_client.get_aweme_all_comments(aweme_id, page_hooks=page_hooks, parent_id=parent_id)
+         async with semaphore:
+             try:
+                 # Pass the list of keywords to the get_aweme_all_comments method
+@@ -260,7 +283,7 @@
+                     aweme_id=aweme_id,
+                     crawl_interval=crawl_interval,
+                     is_fetch_sub_comments=config.ENABLE_GET_SUB_COMMENTS,
+-                    callback=douyin_store.batch_update_dy_aweme_comments,
++                    callback=self.store.batch_update_dy_aweme_comments,
+                     max_count=config.CRAWLER_MAX_COMMENTS_COUNT_SINGLENOTES,
+                 )
+                 # Sleep after fetching comments
+@@ -288,7 +311,7 @@
+ 
+             creator_info: Dict = await self.dy_client.get_user_info(user_id)
+             if creator_info:
+-                await douyin_store.save_creator(user_id, creator=creator_info)
++                await self.store.save_creator(user_id, creator=creator_info)
+ 
+             # Get all video information of the creator
+             all_video_list = await self.dy_client.get_all_user_aweme_posts(sec_user_id=user_id, callback=self.fetch_creator_video_detail)
+@@ -306,7 +329,7 @@
+         note_details = await asyncio.gather(*task_list)
+         for aweme_item in note_details:
+             if aweme_item is not None:
+-                await douyin_store.update_douyin_aweme(aweme_item=aweme_item)
++                await self.store.update_douyin_aweme(aweme_item=aweme_item)
+                 await self.download_media(aweme_item=aweme_item)
+ 
+     async def create_douyin_client(self, httpx_proxy: Optional[str]) -> DouYinClient:
+@@ -420,6 +443,7 @@
+ 
+     def _get_media_downloader(self) -> MediaDownloader:
+         """惰性创建媒体下载器，并同步最新的代理与 UA（代理池是就地刷新的）"""
++        from media_downloader import MediaDownloader
+         if self._media_downloader is None:
+             self._media_downloader = MediaDownloader(
+                 platform="dy",
+--- a/media_platform/douyin/help.py
++++ b/media_platform/douyin/help.py
+@@ -26,6 +26,7 @@
+ 
+ import random
+ import re
++from pathlib import Path
+ from typing import Optional
+ 
+ import execjs
+@@ -34,7 +35,7 @@
+ from model.m_douyin import VideoUrlInfo, CreatorUrlInfo
+ from tools.crawler_util import extract_url_params_to_dict
+ 
+-douyin_sign_obj = execjs.compile(open('libs/douyin.js', encoding='utf-8-sig').read())
++douyin_sign_obj = execjs.compile((Path(__file__).resolve().parents[2] / 'libs/douyin.js').read_text(encoding='utf-8-sig'))
+ 
+ def get_web_id():
+     """
+--- a/media_platform/douyin/login.py
++++ b/media_platform/douyin/login.py
+@@ -41,7 +41,8 @@
+                  browser_context: BrowserContext, # type: ignore
+                  context_page: Page, # type: ignore
+                  login_phone: Optional[str] = "",
+-                 cookie_str: Optional[str] = ""
++                 cookie_str: Optional[str] = "",
++                 manual_login=None,
+                  ):
+         config.LOGIN_TYPE = login_type
+         self.browser_context = browser_context
+@@ -49,6 +50,7 @@
+         self.login_phone = login_phone
+         self.scan_qrcode_time = 60
+         self.cookie_str = cookie_str
++        self.manual_login = manual_login
+ 
+     async def begin(self):
+         """
+@@ -56,6 +58,8 @@
+             The verification accuracy of the slider verification is not very good... If there are no special requirements, it is recommended not to use Douyin login, or use cookie login
+         """
+ 
++        if self.manual_login is not None:
++            return await self.manual_login()
+         # popup login dialog
+         await self.popup_login_dialog()
+ 
+--- a/tools/browser_launcher.py
++++ b/tools/browser_launcher.py
+@@ -41,6 +41,17 @@
+         self.system = platform.system()
+         self.browser_process = None
+         self.debug_port = None
++
++    def launch_dedicated(self, browser_path, profile, port):
++        """Service-owned Chrome; loopback CDP, no daily profile or stealth flags."""
++        Path(profile).mkdir(parents=True, exist_ok=True)
++        args = [str(browser_path), f'--user-data-dir={Path(profile).resolve()}',
++                '--remote-debugging-address=127.0.0.1', f'--remote-debugging-port={port}',
++                '--no-first-run', '--no-default-browser-check', 'about:blank']
++        self.browser_process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
++            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0, start_new_session=os.name != 'nt')
++        self.debug_port = port
++        return self.browser_process
+ 
+     def detect_browser_paths(self) -> List[str]:
+         """
+--- a/tools/cdp_browser.py
++++ b/tools/cdp_browser.py
+@@ -37,7 +37,8 @@
+     CDP browser manager, responsible for launching and managing browsers connected via CDP
+     """
+ 
+-    def __init__(self):
++    def __init__(self, *, connection_url=None):
++        self.connection_url = connection_url
+         self.launcher = BrowserLauncher()
+         self.browser: Optional[Browser] = None
+         self.browser_context: Optional[BrowserContext] = None
+@@ -105,6 +106,16 @@
+         Launch browser and connect via CDP
+         """
+         try:
++            if self.connection_url is not None:
++                # The workbench service owns this dedicated browser. Workers
++                # attach only, and Playwright.stop() disconnects on task exit.
++                from urllib.parse import urlsplit
++                parsed = urlsplit(self.connection_url)
++                if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port:
++                    raise ValueError('A loopback CDP endpoint is required')
++                self.browser = await playwright.chromium.connect_over_cdp(self.connection_url)
++                self.browser_context = self.browser.contexts[0]
++                return self.browser_context
+             if config.CDP_CONNECT_EXISTING:
+                 # Connect to an existing browser that already has remote debugging enabled
+                 return await self._connect_existing_browser(playwright, playwright_proxy, user_agent)
+@@ -441,6 +452,11 @@
+         Args:
+             force: Whether to force cleanup browser process (ignoring AUTO_CLOSE_BROWSER config)
+         """
++        if self.connection_url is not None:
++            # Attached workers do not own either browser or default context.
++            # Their Playwright driver is stopped by the embedding lifecycle.
++            self.browser_context = self.browser = None
++            return
+         try:
+             # Close browser context
+             if self.browser_context:
+--- /dev/null
++++ b/media_platform/douyin/pagination.py
+@@ -0,0 +1,49 @@
++"""Workbench compatibility v1: explicit resumable page hooks.
++
++No storage implementation, sleeps or retries are hidden here. A page is committed
++by the host before its cursor advances. Failure/cancellation never marks done.
++"""
++async def collect_pages(fetch, hooks):
++    checkpoint = hooks.checkpoint()
++    if checkpoint.get('done'):
++        return
++    cursor = checkpoint.get('cursor', 0)
++    resumed, restarted, stalls = bool(cursor), False, 0
++    visited = {str(cursor)}
++    while True:
++        hooks.check_stop()
++
++        async def request_page():
++            raw = await fetch(cursor)
++            return hooks.normalize(raw, cursor)
++
++        try:
++            page = await hooks.request(request_page)
++        except hooks.page_error:
++            if resumed and not restarted:
++                hooks.restart()
++                cursor, visited, stalls, restarted = 0, {'0'}, 0, True
++                continue
++            raise
++        if page.get('private'):
++            hooks.private()
++            return
++        rows, done, next_cursor = page['rows'], page['done'], page['next_cursor']
++        raw_count = len(rows)
++        rows = hooks.filter(rows, done)
++        if done:
++            hooks.commit(rows, next_cursor, True)
++            return
++        if not raw_count or not page['has_cursor'] or str(next_cursor) in visited:
++            hooks.commit(rows, cursor, False)
++            stalls += 1
++            if stalls >= 3:
++                if resumed and not restarted:
++                    hooks.restart()
++                    cursor, visited, stalls, restarted = 0, {'0'}, 0, True
++                    continue
++                raise hooks.page_error('连续三次空页或分页游标停滞，采集尚未完成，可稍后继续。')
++            continue
++        hooks.commit(rows, next_cursor, False)
++        cursor, stalls = next_cursor, 0
++        visited.add(str(cursor))

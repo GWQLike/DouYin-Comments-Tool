@@ -1,0 +1,20 @@
+[project]
+name = "douyin-comments-workbench"
+version = "0.1.0"
+description = "Local Douyin video comment search workbench"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "httpx==0.28.1",
+  "pydantic>=2.10,<3", "playwright>=1.51,<2", "opencc>=1.1.9,<2",
+  "rapidfuzz>=3.12,<4", "tzdata>=2025.1", "pyexecjs==1.5.1",
+  "pillow>=11,<13", "opencv-python-headless>=4.11,<5", "tenacity>=8.2,<10",
+  "python-dotenv>=1,<2", "aiofiles>=23,<26", "aiosqlite>=0.21,<1",
+  "requests>=2.32,<3", "redis>=4.6,<7", "parsel>=1.9,<2", "aiomysql>=0.2,<1"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.25,<2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

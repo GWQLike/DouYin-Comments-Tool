@@ -1,0 +1,71 @@
+# Local records, browser sessions, exports and backups
+data/
+browser-profile/
+chrome-profile/
+browser_data/
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pid
+*.bak
+
+# Credentials and machine-specific settings
+.env
+.env.*
+!.env.example
+.npmrc
+.pypirc
+*.pem
+*.key
+*.p12
+*.pfx
+cookies.json
+cookies.txt
+storage_state.json
+.aws/
+.ssh/
+.codex/
+.agents/
+
+# Dependencies, build output and test caches
+.venv/
+node_modules/
+dist/
+__pycache__/
+*.py[cod]
+*.tsbuildinfo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.npm-cache/
+.uv-cache/
+.coverage*
+htmlcov/
+test-results/
+playwright-report/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+vendor/MediaCrawler/.git/
+
+# Upstream extras are kept locally, not redistributed with this workbench.
+# Includes captured pages and screenshots which may contain session data.
+/vendor/MediaCrawler/docs/
+/vendor/MediaCrawler/test/
+/vendor/MediaCrawler/tests/
+/vendor/MediaCrawler/media_platform/tieba/test_data/
+/vendor/MediaCrawler/webui/*
+!/vendor/MediaCrawler/webui/LICENSE
+/vendor/MediaCrawler/.github/
+/vendor/MediaCrawler/README.md
+/vendor/MediaCrawler/README_en.md
+/vendor/MediaCrawler/README_es.md
+/vendor/MediaCrawler/recv_sms.py

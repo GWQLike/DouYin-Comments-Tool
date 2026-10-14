@@ -1,0 +1,34 @@
+{
+  "upstream_commit": "5d547f45862ca2d4b404e5a51775879d579b29d4",
+  "patch_version": "workbench.1",
+  "files": {
+    "media_platform/douyin/client.py": {
+      "baseline_sha256": "51a9b11785c28ab8431eace09f72b79450c5487a6316707ee1812c6c4b8ddfa2",
+      "patched_sha256": "0e6c825e10e96bdf4aea961e549d3a200bcecde667e191e03c5a72ef696de82a"
+    },
+    "media_platform/douyin/core.py": {
+      "baseline_sha256": "dbb60a223bc94c0d3a981249b658eb90fdbf6f75bfd1d8c0f7934b436c2c1852",
+      "patched_sha256": "6f66a21d680a4c5acf56a168ca15653417702cd18353c196e3c25bbcdcccd18c"
+    },
+    "media_platform/douyin/help.py": {
+      "baseline_sha256": "0c3c941e180b04497944b8868c35c1e54d3bbb7a6483a5a8045f0f5d81ef783c",
+      "patched_sha256": "c2d9d6a5f435a9637f6f86d2383f01b5cd5266f327766fe94402a92c6733f68a"
+    },
+    "media_platform/douyin/login.py": {
+      "baseline_sha256": "e5864a0458fd02caa80e64f05917b5e31becb25f9064eabe73ec15f460ef53f0",
+      "patched_sha256": "ef32b0cca8be7b6367e6d25cecd8379fc7c7b8d933ee0aa24fe0b405d10868d6"
+    },
+    "tools/browser_launcher.py": {
+      "baseline_sha256": "cddf2ec3fbf5c1b84f13fbbaa6be3616b354854877020595cf2c5d16c156692a",
+      "patched_sha256": "f226f65e83c00e246cd6664a61ea8e41699e0f3c325599fc882b7d378b22f5d2"
+    },
+    "tools/cdp_browser.py": {
+      "baseline_sha256": "f87bbb5ff6b55b18ef6e097e6bfd5230031288313316025663e79a98402c88e7",
+      "patched_sha256": "b01ceac923981267137d8127afcd888a660b0c47b9e39edcddff8ea87123fed9"
+    },
+    "media_platform/douyin/pagination.py": {
+      "baseline_sha256": null,
+      "patched_sha256": "face864b4105f950c08001ba541443d11d2cc7eb39530eba72f348ae4f63529b"
+    }
+  }
+}
