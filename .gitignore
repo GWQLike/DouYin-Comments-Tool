@@ -9,6 +9,7 @@ browser_data/
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+backup.incomplete*
 *.log
 *.pid
 *.bak

@@ -48,6 +48,8 @@ def test_existing_task_migration_preserves_opt_in_and_new_task_opts_out(tmp_path
     db.save_page(tid, '', [row()], 123, False)
     with sqlite3.connect(path) as con:
         con.execute('ALTER TABLE tasks DROP COLUMN verify_authors')
+        # This fixture represents a release before both the option and schema versions.
+        con.execute('PRAGMA user_version=0')
     db = Database(path)
     assert db.get_task(tid)['verify_authors'] is True
     assert db.get_checkpoint(tid)['cursor'] == 123

@@ -7,74 +7,14 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
+from .migrations import initialize_database
+
 
 class Database:
     def __init__(self, path):
         self.path = str(Path(path).resolve())
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with self.connection() as con:
-            con.executescript("""
-                PRAGMA journal_mode=WAL;
-                CREATE TABLE IF NOT EXISTS tasks (
-                    id TEXT PRIMARY KEY, source_url TEXT NOT NULL, video_id TEXT DEFAULT '',
-                    title TEXT DEFAULT '', status TEXT DEFAULT 'created', created_at REAL,
-                    updated_at REAL, error TEXT, stop_requested INTEGER DEFAULT 0,
-                    collection_complete INTEGER DEFAULT 0, verification_complete INTEGER DEFAULT 0
-                );
-                CREATE TABLE IF NOT EXISTS comments (
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    comment_id TEXT NOT NULL, video_id TEXT NOT NULL, parent_id TEXT DEFAULT '',
-                    text TEXT DEFAULT '', created_at REAL, ip_label TEXT DEFAULT '',
-                    nickname TEXT DEFAULT '', douyin_id TEXT DEFAULT '', uid TEXT DEFAULT '',
-                    sec_uid TEXT DEFAULT '', author_key TEXT NOT NULL,
-                    identity_state TEXT DEFAULT 'unknown', reply_count INTEGER DEFAULT 0,
-                    PRIMARY KEY (task_id,comment_id)
-                );
-                CREATE INDEX IF NOT EXISTS comments_author ON comments(task_id,author_key);
-                CREATE INDEX IF NOT EXISTS comments_time ON comments(task_id,created_at DESC,comment_id DESC);
-                CREATE TABLE IF NOT EXISTS authors (
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    author_key TEXT NOT NULL, uid TEXT DEFAULT '', sec_uid TEXT DEFAULT '',
-                    douyin_id TEXT DEFAULT '', nickname TEXT DEFAULT '', identity_state TEXT DEFAULT 'unknown',
-                    PRIMARY KEY(task_id,author_key)
-                );
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    thread_id TEXT NOT NULL, cursor TEXT DEFAULT '0', done INTEGER DEFAULT 0,
-                    restarts INTEGER DEFAULT 0, PRIMARY KEY(task_id,thread_id)
-                );
-                CREATE TABLE IF NOT EXISTS session (id INTEGER PRIMARY KEY CHECK(id=1),status TEXT,error TEXT);
-                INSERT OR IGNORE INTO session VALUES(1,'logged_out',NULL);
-                CREATE TABLE IF NOT EXISTS liked_videos (
-                    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-                    video_id TEXT NOT NULL, title TEXT DEFAULT '', author_name TEXT DEFAULT '',
-                    author_douyin_id TEXT DEFAULT '', created_at REAL, video_url TEXT NOT NULL,
-                    author_key TEXT NOT NULL, uid TEXT DEFAULT '', sec_uid TEXT DEFAULT '',
-                    PRIMARY KEY(task_id,video_id)
-                );
-                CREATE INDEX IF NOT EXISTS likes_time ON liked_videos(task_id,created_at DESC,video_id DESC);
-                CREATE INDEX IF NOT EXISTS likes_author ON liked_videos(task_id,author_key);
-            """)
-            # Additive migration preserves existing comment tasks and checkpoints.
-            columns = {row['name'] for row in con.execute('PRAGMA table_info(tasks)')}
-            if 'verify_authors' not in columns:
-                # Existing tasks retain their original behavior. New inserts opt out.
-                con.execute('ALTER TABLE tasks ADD COLUMN verify_authors INTEGER NOT NULL DEFAULT 1')
-            for name, default in (('kind', 'comments'), ('target_account', ''),
-                                  ('target_sec_uid', ''), ('target_nickname', ''), ('visibility', 'unknown')):
-                if name not in columns:
-                    con.execute(f"ALTER TABLE tasks ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
-            if 'max_videos' not in columns:
-                con.execute('ALTER TABLE tasks ADD COLUMN max_videos INTEGER NOT NULL DEFAULT 0')
-            for name in ('start_time', 'end_time'):
-                if name not in columns:
-                    con.execute(f'ALTER TABLE tasks ADD COLUMN {name} REAL')
-            if 'list_order' not in columns:
-                con.execute("ALTER TABLE tasks ADD COLUMN list_order TEXT NOT NULL DEFAULT 'publication'")
-            video_columns = {row['name'] for row in con.execute('PRAGMA table_info(liked_videos)')}
-            for name, declaration in (('action_at', 'REAL'), ('collected_order', 'INTEGER')):
-                if name not in video_columns:
-                    con.execute(f'ALTER TABLE liked_videos ADD COLUMN {name} {declaration}')
+        initialize_database(Path(self.path))
 
     @contextmanager
     def connection(self):
