@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from contextlib import contextmanager
 from typing import Any, Callable, Awaitable
 from backend.crawler import StopRequested, PageFailure, ManualActionRequired, _string, normalize_profile, validate_response
 from backend.likes import account_key, public_number, profile_visibility
@@ -20,7 +21,43 @@ class CommentTask:
         self.stop = stop or (lambda: False)
         self.concurrency = max(1, min(3, concurrency))
         self._profile_requests: dict[str, asyncio.Task] = {}
-        self.metrics = {'author_seconds': 0.0, 'profile_queries': 0, 'profile_reuses': 0}
+        self.metrics = {'author_seconds': 0.0, 'profile_queries': 0, 'profile_reuses': 0,
+                        'database_write_seconds': 0.0, 'stages': {}}
+
+    @contextmanager
+    def phase(self, name):
+        before = self.db.get_task(self.task_id)
+        transport = getattr(self.client, 'metrics', {})
+        policy = getattr(getattr(self.client, 'policy', None), 'metrics', {})
+        requests, http, wait = transport.get('http_requests', 0), transport.get('http_seconds', 0), policy.get('schedule_wait_seconds', 0)
+        writes, began = self.metrics['database_write_seconds'], time.perf_counter()
+        try:
+            yield
+        finally:
+            after = self.db.get_task(self.task_id)
+            self.metrics['stages'][name] = {
+                'elapsed_seconds': round(time.perf_counter() - began, 3),
+                'requests': transport.get('http_requests', 0) - requests,
+                'http_seconds': round(transport.get('http_seconds', 0) - http, 3),
+                'wait_seconds': round(policy.get('schedule_wait_seconds', 0) - wait, 3),
+                'database_write_seconds': round(self.metrics['database_write_seconds'] - writes, 3),
+                'new_records': sum(after[key] - before[key] for key in ('main_count', 'reply_count', 'video_count')),
+                'authors_resolved': max(0, before['unknown_authors'] - after['unknown_authors']) if name == 'authors' else 0,
+            }
+
+    async def verify_saved_authors(self):
+        with self.phase('authors'):
+            await self.hydrate_authors()
+        task = self.db.get_task(self.task_id)
+        self.db.update_task(self.task_id, verification_complete=not task['unknown_authors'],
+            status='private' if task['visibility'] == 'private' else 'completed' if task['collection_complete'] else 'partial')
+
+    def write(self, operation, *args, **kwargs):
+        began = time.perf_counter()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            self.metrics['database_write_seconds'] += time.perf_counter() - began
 
     def check_stop(self) -> None:
         if self.stop() or self.db.should_stop(self.task_id):
@@ -155,7 +192,7 @@ class CommentTask:
                           (fields := normalize_profile({"user": {**other, "unique_id": other["douyin_id"]}}, author))]
             if len({candidate["douyin_id"] for candidate in candidates}) == 1:
                 fields = candidates[0]
-                self.db.save_author(self.task_id, author["author_key"], **fields)
+                self.write(self.db.save_author, self.task_id, author["author_key"], **fields)
                 author.update(fields)
                 index(author)
                 if author.get("nickname"):
@@ -168,7 +205,7 @@ class CommentTask:
                 return
             fields = normalize_profile(response, author)
             if fields is not None:
-                self.db.save_author(self.task_id, author["author_key"], **fields)
+                self.write(self.db.save_author, self.task_id, author["author_key"], **fields)
                 author.update(fields)
                 index(author)
 
@@ -183,6 +220,9 @@ class CommentTask:
         try:
             self.check_stop()
             task = self.db.get_task(self.task_id)
+            if verify_only:
+                await self.verify_saved_authors()
+                return
             video_id = _string(task.get("video_id"))
             if not video_id:
                 async def resolve():
@@ -203,7 +243,8 @@ class CommentTask:
                     except PageFailure:
                         pass  # Missing title is independent of comment coverage.
                 try:
-                    await self.collect_thread(video_id)
+                    with self.phase('main_comments'):
+                        await self.collect_thread(video_id)
                 except PageFailure as exc:
                     errors.append(str(exc))
                 async def collect_reply(thread):
@@ -211,13 +252,13 @@ class CommentTask:
                         await self.collect_thread(video_id, _string(thread["comment_id"]))
                     except PageFailure as exc:
                         errors.append(str(exc))
-                await self.parallel(self.db.list_threads(self.task_id), collect_reply)
-                complete = self.db.get_checkpoint(self.task_id).get("done", False) and all(
-                    self.db.get_checkpoint(self.task_id, _string(thread["comment_id"])).get("done", False)
-                    for thread in self.db.list_threads(self.task_id)
-                )
+                with self.phase('replies'):
+                    await self.parallel(self.db.pending_threads(self.task_id), collect_reply)
+                complete = self.db.comments_complete(self.task_id)
                 self.db.update_task(self.task_id, collection_complete=bool(complete))
-            await self.hydrate_authors()
+            if task['verify_authors']:
+                with self.phase('authors'):
+                    await self.hydrate_authors()
             verified = not self.db.authors(self.task_id, unresolved_only=True)
             complete = bool(self.db.get_task(self.task_id).get("collection_complete"))
             self.db.update_task(self.task_id, verification_complete=verified,
@@ -296,7 +337,7 @@ class LikesTask(CommentTask):
                 cursor = self.db.get_checkpoint(self.task_id, self.list_kind)['cursor']
                 done = False
             rows = kept
-        self.db.save_likes_page(self.task_id, rows, cursor, done, checkpoint_key=self.list_kind)
+        self.write(self.db.save_likes_page, self.task_id, rows, cursor, done, checkpoint_key=self.list_kind)
         self._video_ids.update(new_ids)
         if limit and len(self._video_ids) >= limit and not done:
             raise PageFailure(f"已达到本次 {limit} 条采集上限，已停止；当前结果不是完整列表。")
@@ -389,7 +430,7 @@ class LikesTask(CommentTask):
                 return
             verified = normalize_profile(profile, author)
             if verified:
-                self.db.save_liked_author(self.task_id, author["author_key"],
+                self.write(self.db.save_liked_author, self.task_id, author["author_key"],
                                           verified["nickname"], verified["douyin_id"])
 
         started = time.perf_counter()
@@ -402,6 +443,9 @@ class LikesTask(CommentTask):
         try:
             self.check_stop()
             task = self.db.get_task(self.task_id)
+            if verify_only:
+                await self.verify_saved_authors()
+                return
             self.db.update_task(self.task_id, status="running", error=None)
             target = await self.resolve_target(task)
             self.target_identity = target
@@ -415,14 +459,17 @@ class LikesTask(CommentTask):
             error = None
             if not verify_only:
                 try:
-                    await self.collect_likes(target["sec_uid"], target["visibility"])
+                    with self.phase('list'):
+                        await self.collect_likes(target["sec_uid"], target["visibility"])
                 except PageFailure as exc:
                     error = str(exc)
                 if self.db.get_task(self.task_id)["status"] == "private":
                     return
                 complete = bool(self.db.get_checkpoint(self.task_id, self.list_kind)["done"])
                 self.db.update_task(self.task_id, collection_complete=complete)
-            await self.hydrate_authors()
+            if task['verify_authors']:
+                with self.phase('authors'):
+                    await self.hydrate_authors()
             complete = self.db.get_task(self.task_id)["collection_complete"]
             self.db.update_task(self.task_id, status="completed" if complete else "partial", error=error,
                                 verification_complete=not self.db.liked_authors(self.task_id))

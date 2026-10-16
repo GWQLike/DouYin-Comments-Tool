@@ -5,6 +5,7 @@ import { Icon } from './icons';
 import { Results, dateTime } from './Results';
 import { VideoListResults } from './VideoListResults';
 import { VideoListTask } from './VideoListTask';
+import { AuthorVerification } from './AuthorVerification';
 import { VIDEO_LIST_ACTIONS, VIDEO_LIST_LABELS } from './videoLists';
 import type { CommentPage, Filters, VideoPage, VideoListDraft, VideoListKind, Session, Task, TaskKind, TaskStatus } from './types';
 
@@ -93,7 +94,6 @@ export default function App() {
   useEffect(() => {
     if (!selectedId) { setLoading(false); setResultError(null); return; }
     const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
     setLoading(true);
     setResultError(null);
     async function poll() {
@@ -107,11 +107,11 @@ export default function App() {
         const maxPage = Math.max(1, Math.ceil(data.total / data.page_size));
         if (page > maxPage) setPage(maxPage);
       } catch (error) { if (!controller.signal.aborted) setResultError(errorMessage(error)); }
-      finally { if (!controller.signal.aborted) { setLoading(false); if (active) timer = setTimeout(poll, 3000); } }
+      finally { if (!controller.signal.aborted) setLoading(false); }
     }
     void poll();
-    return () => { controller.abort(); clearTimeout(timer); };
-  }, [selectedId, page, resultKey, resultQuery, listMode, active, reload]);
+    return () => { controller.abort(); };
+  }, [selectedId, page, resultKey, resultQuery, listMode, task?.updated_at, reload]);
 
   useEffect(() => {
     if (!notice) return;
@@ -153,6 +153,16 @@ export default function App() {
       }
       if (action === 'refresh') setNotice('已创建新的采集批次，历史结果仍保留。点击「开始采集」启动。');
       if (action === 'stop') setNotice('已发送停止请求，当前页保存后暂停。');
+    } catch (error) { setActionError(errorMessage(error)); }
+    finally { setPending(null); }
+  }
+
+  async function changeVerification(enabled: boolean) {
+    if (!task || pending || active) return;
+    setPending('options'); setActionError(null);
+    try {
+      const nextTask = await api<Task>(`/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', body: JSON.stringify({ verify_authors: enabled }) });
+      setTasks(current => current.map(item => item.id === nextTask.id ? nextTask : item));
     } catch (error) { setActionError(errorMessage(error)); }
     finally { setPending(null); }
   }
@@ -250,11 +260,12 @@ export default function App() {
         </form>
       </section>
 
-      {task && listKind ? <VideoListTask kind={listKind} task={task} active={active} anyActive={anyActive} pending={pending} statusLabel={STATUS_LABELS[task.status]} onAction={action => void taskAction(action)} /> : null}
+      {task && listKind ? <VideoListTask kind={listKind} task={task} active={active} anyActive={anyActive} pending={pending} statusLabel={STATUS_LABELS[task.status]} onAction={action => void taskAction(action)} onVerificationChange={enabled => void changeVerification(enabled)} /> : null}
 
       {task && !listMode ? <section className="task-card" aria-label="当前采集任务"><div className="task-summary"><div className="video-thumbnail"><Icon name="play" size={24} /></div><div className="video-info"><div className="video-heading"><h2 title={taskTitle(task)}>{taskTitle(task)}</h2><StatusBadge status={task.status} /></div><div className="video-detail"><span>{task.video_id ? `视频 ID ${task.video_id}` : '短链接将在开始采集后解析，可先打开原视频核对'}</span>{videoUrl ? <a href={videoUrl} target="_blank" rel="noopener noreferrer">打开原视频<Icon name="external" size={12} /></a> : null}</div></div><div className="task-controls">{active ? <button className="button secondary small" onClick={() => void taskAction('stop')} disabled={Boolean(pending)}><Icon name="stop" size={15} />{pending === 'stop' ? '正在停止' : '停止采集'}</button> : <button className="button primary small" onClick={() => void taskAction('start')} disabled={Boolean(pending) || (anyActive && !active) || task.collection_complete}><Icon name="play" size={15} />{pending === 'start' ? '正在启动' : task.status === 'created' ? '开始采集' : task.collection_complete ? '采集已完成' : '继续采集'}</button>}<button className="icon-button refresh-task" title="新建批次重新采集，保留当前结果" aria-label="重新采集" onClick={() => void taskAction('refresh')} disabled={Boolean(pending) || active}><Icon name="refresh" size={17} /></button></div></div>
         <div className="stats-grid"><div><span>主评论</span><strong>{task.main_count.toLocaleString()}<small>条</small></strong></div><div><span>楼中楼回复</span><strong>{task.reply_count.toLocaleString()}<small>条</small></strong></div><div><span>当前匹配</span><strong className="green-number">{results?.total.toLocaleString() ?? '—'}<small>条</small></strong></div><div><span>待核实作者</span><strong>{task.unknown_authors.toLocaleString()}<small>位</small></strong></div></div>
-        <div className="task-progress"><span>{active ? <span className="pulse-dot" /> : <Icon name={task.collection_complete ? 'check' : 'info'} size={14} />}{task.status === 'running' ? '正在逐页采集主评论与回复，结果实时更新' : task.status === 'verifying' ? '正在核实作者抖音号，已有结果可继续检索' : task.status === 'waiting_login' ? '等待浏览器登录或验证，完成后继续处理' : task.collection_complete ? `当前可获取评论已采集完成${task.verification_complete ? '，作者信息已核实' : '，部分作者信息待核实'}` : task.status === 'created' ? '准备就绪 · 采集前请确认已登录抖音' : '进度已保存在本机，可继续采集'} </span>{task.unknown_authors > 0 ? <button className="text-button" disabled={Boolean(pending) || anyActive} onClick={() => void taskAction('verify')}><Icon name="refresh" size={13} />重新核实</button> : null}</div>
+        <div className="task-progress"><span>{active ? <span className="pulse-dot" /> : <Icon name={task.collection_complete ? 'check' : 'info'} size={14} />}{task.status === 'running' ? '正在逐页采集主评论与回复，结果实时更新' : task.status === 'verifying' ? '正在核实作者抖音号，已有结果可继续检索' : task.status === 'waiting_login' ? '等待浏览器登录或验证，完成后继续处理' : task.collection_complete ? `当前可获取评论已采集完成${task.verification_complete ? '，作者信息已核实' : '，部分作者信息待核实'}` : task.status === 'created' ? '准备就绪 · 采集前请确认已登录抖音' : '进度已保存在本机，可继续采集'} </span></div>
+        <AuthorVerification task={task} active={active} anyActive={anyActive} pending={pending} onChange={enabled => void changeVerification(enabled)} onVerify={() => void taskAction('verify')} />
         {task.error ? <div className="task-error"><Icon name="info" size={15} /><span>{task.error}</span></div> : null}
       </section> : null}
 

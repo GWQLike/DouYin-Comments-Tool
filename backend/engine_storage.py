@@ -45,7 +45,7 @@ class CommentPages:
         return rows
 
     def commit(self, rows, cursor, done):
-        self.task.db.save_page(self.task.task_id, self.parent_id, rows, cursor, done)
+        self.task.write(self.task.db.save_page, self.task.task_id, self.parent_id, rows, cursor, done)
 
 
 class ActivityPages:

@@ -57,6 +57,9 @@ class Database:
             """)
             # Additive migration preserves existing comment tasks and checkpoints.
             columns = {row['name'] for row in con.execute('PRAGMA table_info(tasks)')}
+            if 'verify_authors' not in columns:
+                # Existing tasks retain their original behavior. New inserts opt out.
+                con.execute('ALTER TABLE tasks ADD COLUMN verify_authors INTEGER NOT NULL DEFAULT 1')
             for name, default in (('kind', 'comments'), ('target_account', ''),
                                   ('target_sec_uid', ''), ('target_nickname', ''), ('visibility', 'unknown')):
                 if name not in columns:
@@ -85,7 +88,9 @@ class Database:
             con.close()
 
     def create_task(self, source_url, video_id='', *, kind='comments', target_account='', max_videos=0,
-                    start_time=None, end_time=None, list_order='publication'):
+                    start_time=None, end_time=None, list_order='publication', verify_authors=False):
+        if type(verify_authors) is not bool:
+            raise ValueError('Invalid author verification option')
         if kind not in ('comments', 'likes', 'recommendations'):
             raise ValueError('Unknown task kind')
         if type(max_videos) is not int or max_videos < 0:
@@ -97,8 +102,8 @@ class Database:
         task_id = uuid.uuid4().hex
         now = time.time()
         with self.connection() as con:
-            con.execute('INSERT INTO tasks(id,source_url,video_id,created_at,updated_at,kind,target_account,max_videos,start_time,end_time,list_order) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                        (task_id, source_url, str(video_id), now, now, kind, target_account, max_videos, start_time, end_time, list_order))
+            con.execute('INSERT INTO tasks(id,source_url,video_id,created_at,updated_at,kind,target_account,max_videos,start_time,end_time,list_order,verify_authors) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (task_id, source_url, str(video_id), now, now, kind, target_account, max_videos, start_time, end_time, list_order, verify_authors))
         return self.get_task(task_id)
 
     def get_task(self, task_id):
@@ -114,6 +119,7 @@ class Database:
             if result['kind'] in ('likes', 'recommendations'):
                 result['unknown_authors'] = con.execute("SELECT COUNT(DISTINCT author_key) FROM liked_videos WHERE task_id=? AND author_douyin_id=''", (task_id,)).fetchone()[0]
             result['collection_complete'] = bool(result['collection_complete'])
+            result['verify_authors'] = bool(result['verify_authors'])
             result['verification_complete'] = bool(result['collection_complete'] and result['unknown_authors'] == 0)
             result.pop('stop_requested', None)
             return result
@@ -148,6 +154,7 @@ class Database:
         for row in rows:
             task = dict(row)
             task['collection_complete'] = bool(task['collection_complete'])
+            task['verify_authors'] = bool(task['verify_authors'])
             task['verification_complete'] = bool(task['collection_complete'] and task['unknown_authors'] == 0)
             task.pop('stop_requested', None)
             results.append(task)
@@ -155,7 +162,9 @@ class Database:
 
     def update_task(self, task_id, **fields):
         allowed = {'source_url', 'video_id', 'title', 'status', 'error', 'stop_requested', 'collection_complete', 'verification_complete',
-                   'target_sec_uid', 'target_nickname', 'visibility'}
+                   'target_sec_uid', 'target_nickname', 'visibility', 'verify_authors'}
+        if 'verify_authors' in fields and type(fields['verify_authors']) is not bool:
+            raise ValueError('Invalid author verification option')
         if not fields.keys() <= allowed:
             raise ValueError('Unknown task fields: ' + ','.join(fields.keys() - allowed))
         fields['updated_at'] = time.time()
@@ -232,6 +241,61 @@ class Database:
     def list_threads(self, task_id):
         with self.connection() as con:
             return [dict(r) for r in con.execute("SELECT comment_id,reply_count FROM comments WHERE task_id=? AND parent_id='' AND reply_count>0", (task_id,))]
+
+    def pending_threads(self, task_id):
+        with self.connection() as con:
+            return [dict(r) for r in con.execute('''SELECT c.comment_id,c.reply_count
+                FROM comments c LEFT JOIN checkpoints p ON p.task_id=c.task_id AND p.thread_id=c.comment_id
+                WHERE c.task_id=? AND c.parent_id='' AND c.reply_count>0 AND COALESCE(p.done,0)=0''', (task_id,))]
+
+    def comments_complete(self, task_id):
+        with self.connection() as con:
+            return bool(con.execute('''SELECT EXISTS(SELECT 1 FROM checkpoints WHERE task_id=? AND thread_id='' AND done=1)
+                AND NOT EXISTS(SELECT 1 FROM comments c LEFT JOIN checkpoints p
+                    ON p.task_id=c.task_id AND p.thread_id=c.comment_id
+                    WHERE c.task_id=? AND c.parent_id='' AND c.reply_count>0 AND COALESCE(p.done,0)=0)''', (task_id, task_id)).fetchone()[0])
+
+    COMMENT_SELECT = '''SELECT c.*,
+        COALESCE(NULLIF(a.douyin_id,''),c.douyin_id) AS public_number,
+        COALESCE(NULLIF(c.nickname,''),a.nickname,'') AS display_name,
+        COALESCE(a.identity_state,c.identity_state) AS resolved_state
+        FROM comments c LEFT JOIN authors a ON c.task_id=a.task_id AND c.author_key=a.author_key'''
+
+    def read_comment_page(self, task_id, filters, *, limit, offset=0):
+        from .search import format_comment, match_text
+        if type(limit) is not int or limit < 0 or type(offset) is not int or offset < 0:
+            raise ValueError('Invalid comment page')
+        params = [task_id]
+        where = ' WHERE c.task_id=?'
+        if filters.account:
+            # Match author keys before time filtering, exactly like select_comments.
+            where += ''' AND c.author_key IN (SELECT author_key FROM (''' + self.COMMENT_SELECT + ''' WHERE c.task_id=?)
+                WHERE resolved_state='verified' AND public_number=?)'''
+            params.extend((task_id, filters.account))
+        for operator, bound in (('>=', filters.start_ts), ('<=', filters.end_ts)):
+            if bound is not None:
+                where += f' AND c.created_at{operator}?'
+                params.append(bound)
+        query = self.COMMENT_SELECT + where
+        order = ' ORDER BY c.created_at IS NULL,c.created_at DESC,c.comment_id DESC'
+        with self.connection() as con:
+            con.execute('BEGIN')
+            missing = con.execute('SELECT COUNT(*) FROM comments WHERE task_id=? AND created_at IS NULL', (task_id,)).fetchone()[0]
+            if not filters.keyword:
+                total = con.execute('SELECT COUNT(*) FROM (' + query + ')', params).fetchone()[0]
+                rows = con.execute(query + order + ' LIMIT ? OFFSET ?', (*params, min(limit, 2**63-1), min(offset, 2**63-1)))
+                items = [format_comment(dict(row)) for row in rows]
+            else:
+                total, items = 0, []
+                cursor = con.execute(query + order, params)
+                while batch := cursor.fetchmany(256):
+                    for row in batch:
+                        matched, kind, score = match_text(row['text'], filters)
+                        if matched:
+                            if offset <= total < offset + limit:
+                                items.append(format_comment(dict(row), kind, score))
+                            total += 1
+        return items, total, missing
 
     def read_comments(self, task_id):
         # A single SQL read yields a consistent export/search snapshot, including hydrated identity.

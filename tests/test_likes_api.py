@@ -37,7 +37,7 @@ def test_likes_create_and_comment_routes_remain_distinct(client):
     assert task['kind'] == 'likes' and task['target_account'] == 'target.demo'
     assert task['video_count'] == 1 and task['main_count'] == 0
     assert client.get(f'/api/tasks/{tid}/comments').status_code == 400
-    assert client.post(f'/api/tasks/{tid}/verify').status_code == 400
+    assert client.post(f'/api/tasks/{tid}/verify').status_code == 200
     comment = client.post('/api/tasks', json={'url':'https://www.douyin.com/video/123'}).json()
     assert comment['kind'] == 'comments' and comment['video_count'] == 0
     assert client.get(f"/api/tasks/{comment['id']}/videos").status_code == 400

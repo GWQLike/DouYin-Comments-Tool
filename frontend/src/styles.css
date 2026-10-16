@@ -109,6 +109,8 @@ svg { flex-shrink: 0; }
 .status-badge { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; padding: 4px 7px; border-radius: 4px; background: #f1f3eb; color: #88907a; font-size: 9px; white-space: nowrap; }
 .status-dot { width: 4px; height: 4px; background: currentColor; }
 .status-running, .status-verifying, .status-completed { background: #eaf2df; color: #6b8c4d; }
+.author-options label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.author-options input { width: 15px; height: 15px; margin: 0; accent-color: #214e40; }
 .status-waiting_login, .status-partial { background: #f9f0dd; color: #a08a52; }
 .status-failed { background: #f9eae2; color: #b7755d; }
 .status-private { background: #eeeae3; color: #95816a; }

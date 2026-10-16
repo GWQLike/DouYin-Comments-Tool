@@ -24,6 +24,7 @@ class ProtectionPause(ControlledStop):
 
 class StableRequestPolicy(RequestPolicy):
     RANGES = ((2, 4), (4, 8), (8, 16), (16, 32))
+    NORMAL_RANGES = ((2, 4), (1.5, 2.5), (1, 2))
 
     def __init__(self, state_path, *, wall_clock=time.time, uniform=random.uniform, **kwargs):
         super().__init__(base_interval=2, max_concurrency=1, wall_clock=wall_clock, **kwargs)
@@ -34,6 +35,8 @@ class StableRequestPolicy(RequestPolicy):
         self.paused = bool(self.state.get('manual_required'))
         self._level = self.state['level']
         self._successes = self.state['successes']
+        # Acceleration belongs to this worker; persisted failure recovery does not.
+        self._normal_step = self._normal_successes = 0
         # Starting another worker is an explicit user continue, only after the
         # breaker deadline. It does not remove the guard or pending challenge.
         if self.state.get('halted') and self.wall_clock() >= self.state.get('cooldown_until', 0):
@@ -68,11 +71,19 @@ class StableRequestPolicy(RequestPolicy):
             json.dump(self.state, stream, ensure_ascii=False)
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(self.path)
+        # A simultaneous /session read can briefly hold the destination on Windows.
+        for attempt in range(5):
+            try:
+                temporary.replace(self.path)
+                break
+            except PermissionError as exc:
+                if getattr(exc, 'winerror', None) not in (5, 32, 33) or attempt == 4:
+                    raise
+                time.sleep(.01)
 
     @property
     def interval_range(self):
-        low, high = self.RANGES[self._level]
+        low, high = self.RANGES[self._level] if self._level else self.NORMAL_RANGES[self._normal_step]
         if self.state.get('guard_until', 0) > self.wall_clock():
             low, high = max(low, 8), max(high, 12)
         return low, high
@@ -126,6 +137,7 @@ class StableRequestPolicy(RequestPolicy):
             self._starts.release()
 
     def risk_event(self, reason, delay=60):
+        self._normal_step = self._normal_successes = 0
         now = self.wall_clock()
         events = [stamp for stamp in self.state.get('events', []) if now - stamp < 900]
         repeated = bool(events)
@@ -144,6 +156,7 @@ class StableRequestPolicy(RequestPolicy):
         previous = self.interval
         self._revision += 1
         self._successes = 0
+        self._normal_step = self._normal_successes = 0
         if temporary or rate_limited:
             self._level = min(3, self._level + 1)
             self.metrics['temporary_failures'] += 1
@@ -170,18 +183,27 @@ class StableRequestPolicy(RequestPolicy):
             self.metrics['stale_successes'] += 1
             return
         previous = self.interval
-        self._successes += 1
-        if self._successes >= 20:
-            self._successes = 0
-            self._level = max(0, self._level - 1)
-        self._record_speed_change(previous, 'success_recovery')
-        self.save()
+        recovering = bool(self._level)
+        if self._level:
+            self._successes += 1
+            if self._successes >= 20:
+                self._successes = 0
+                self._level -= 1
+        elif self.state.get('guard_until', 0) <= self.wall_clock():
+            self._normal_successes += 1
+            if self._normal_successes >= 20:
+                self._normal_successes = 0
+                self._normal_step = min(self._normal_step + 1, len(self.NORMAL_RANGES) - 1)
+        self._record_speed_change(previous, 'success_recovery' if previous > 2 else 'success_acceleration')
+        if recovering:
+            self.save()
 
     def pause(self, *, challenge=True, reason='人工验证'):
         if self.paused:
             return
         self._revision += 1
         self._successes = 0
+        self._normal_step = self._normal_successes = 0
         self.paused = True
         self.state['manual_required'] = True
         self.state['challenge_pending'] = challenge
@@ -195,6 +217,7 @@ class StableRequestPolicy(RequestPolicy):
         self.check_control()
         self._revision += 1
         self._successes = 0
+        self._normal_step = self._normal_successes = 0
         self.paused = False
         self.state['manual_required'] = False
         if self.state.pop('challenge_pending', False):
@@ -202,7 +225,8 @@ class StableRequestPolicy(RequestPolicy):
         self.save()
 
     def summary(self):
-        return {**super().summary(), 'speed_mode': 'conservative', 'acceleration_allowed': False,
+        return {**super().summary(), 'speed_mode': 'moderate',
+                'acceleration_allowed': not self.paused and not self._level and self.state.get('guard_until', 0) <= self.wall_clock(),
                 'interval_range_seconds': self.interval_range, 'control_events': self.state.get('control_events', []),
                 **self.public_state(self.path, self.wall_clock())}
 

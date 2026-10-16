@@ -27,6 +27,7 @@ export interface Task {
   unknown_authors: number;
   collection_complete: boolean;
   verification_complete: boolean;
+  verify_authors: boolean;
 }
 
 export interface CollectedVideo {

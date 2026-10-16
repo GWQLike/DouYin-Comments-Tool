@@ -123,6 +123,7 @@ class WorkerManager:
 
 class NewTask(BaseModel):
     url: str = Field(min_length=1, max_length=4096)
+    verify_authors: bool = Field(default=False, strict=True)
 
 
 class NewLikesTask(BaseModel):
@@ -130,6 +131,11 @@ class NewLikesTask(BaseModel):
     max_videos: int = Field(default=0, ge=0, le=100000, strict=True)
     start: str = Field(default='', max_length=64)
     end: str = Field(default='', max_length=64)
+    verify_authors: bool = Field(default=False, strict=True)
+
+
+class TaskOptions(BaseModel):
+    verify_authors: bool = Field(strict=True)
 
 
 def query_filters(account: str = Query('', max_length=128), keyword: str = Query('', max_length=1000),
@@ -213,7 +219,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
             url, video_id = parse_input(body.url)
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
-        return db.create_task(url, video_id)
+        return db.create_task(url, video_id, verify_authors=body.verify_authors)
 
     def create_account_list(body: NewLikesTask, kind: str):
         account = body.account.strip().removeprefix('@')
@@ -226,7 +232,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         return db.create_task('', kind=kind, target_account=account, max_videos=body.max_videos,
-                              start_time=start_time, end_time=end_time, list_order='activity')
+                              start_time=start_time, end_time=end_time, list_order='activity', verify_authors=body.verify_authors)
 
     @app.post('/api/likes/tasks')
     def create_likes(body: NewLikesTask):
@@ -243,6 +249,15 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
             manager.start(task_id)
             return db.get_task(task_id)
 
+    @app.patch('/api/tasks/{task_id}')
+    def task_options(task_id: str, body: TaskOptions):
+        with manager.lock:
+            task = task_or_404(task_id)
+            if task['status'] in ACTIVE or (manager.task_id == task_id and manager.check()):
+                raise HTTPException(409, '请先停止任务，再修改作者核实选项')
+            db.update_task(task_id, verify_authors=body.verify_authors)
+            return db.get_task(task_id)
+
     @app.post('/api/tasks/{task_id}/stop')
     def stop_task(task_id: str):
         with manager.lock:
@@ -257,13 +272,16 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
     def refresh(task_id: str):
         old = task_or_404(task_id)
         return db.create_task(old['source_url'], old['video_id'], kind=old['kind'], target_account=old['target_account'],
-                              max_videos=old['max_videos'], start_time=old['start_time'], end_time=old['end_time'], list_order=old['list_order'])
+                              max_videos=old['max_videos'], start_time=old['start_time'], end_time=old['end_time'], list_order=old['list_order'], verify_authors=old['verify_authors'])
 
     @app.post('/api/tasks/{task_id}/verify')
     def verify(task_id: str):
         with manager.lock:
-            if task_or_404(task_id)['kind'] != 'comments':
-                raise HTTPException(400, '视频列表请使用继续采集或重新采集')
+            task = task_or_404(task_id)
+            if task['status'] in ACTIVE or manager.check():
+                raise HTTPException(409, '请先停止当前操作，再核实作者')
+            if not task['unknown_authors']:
+                return task
             manager.start(task_id, verify=True)
             return db.get_task(task_id)
 
@@ -281,11 +299,10 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
         task = task_or_404(task_id)
         if task['kind'] != 'comments':
             raise HTTPException(400, '该任务是视频列表，请切换到视频结果')
-        rows = db.read_comments(task_id)
-        matched = select_comments(rows, filters)
         offset = (page-1)*page_size
-        return {'items':matched[offset:offset+page_size], 'total':len(matched), 'page':page, 'page_size':page_size,
-                'unknown_authors':task['unknown_authors'], 'missing_times':sum(r['created_at'] is None for r in rows),
+        items, total, missing = db.read_comment_page(task_id, filters, limit=page_size, offset=offset)
+        return {'items':items, 'total':total, 'page':page, 'page_size':page_size,
+                'unknown_authors':task['unknown_authors'], 'missing_times':missing,
                 'collection_complete':task['collection_complete'], 'verification_complete':task['verification_complete']}
 
     @app.get('/api/tasks/{task_id}/videos')

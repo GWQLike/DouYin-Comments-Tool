@@ -40,7 +40,8 @@ def test_recommendations_keep_rows_authors_and_deletion_separate_from_likes_and_
     assert tasks[lid]['kind'] == 'likes' and tasks[lid]['unknown_authors'] == 0
     assert tasks[cid]['kind'] == 'comments' and tasks[cid]['video_count'] == 0
     assert client.get(f'/api/tasks/{rid}/comments').status_code == 400
-    assert client.post(f'/api/tasks/{rid}/verify').status_code == 400
+    assert client.post(f'/api/tasks/{rid}/verify').status_code == 200
+    client.post(f'/api/tasks/{rid}/stop')
     assert client.get(f'/api/tasks/{cid}/videos').status_code == 400
     db.save_liked_author(rid, 'u1', author_douyin_id='recommendation.author')
     assert client.get(f'/api/tasks/{rid}/videos').json()['items'][0]['author_douyin_id'] == 'recommendation.author'

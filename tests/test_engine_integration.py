@@ -83,6 +83,7 @@ def args_for(tmp_path, task):
 
 
 def create(db, kind, **kwargs):
+    kwargs.setdefault('verify_authors', True)
     return db.create_task('https://www.douyin.com/video/123456789' if kind == 'comments' else '',
                          '123456789' if kind == 'comments' else None, kind=kind, target_account='target.user', **kwargs)
 

@@ -77,6 +77,13 @@ def time_text(timestamp):
         return '未提供'
 
 
+def format_comment(row, kind=None, score=None):
+    return {k:row[k] for k in ('comment_id','video_id','parent_id','text','created_at','ip_label')} | {
+        'nickname':row.get('display_name') or '',
+        'douyin_id':row.get('public_number') if row.get('resolved_state') == 'verified' else '',
+        'time_text':time_text(row['created_at']),'match_type':kind,'score':score}
+
+
 def select_comments(rows, filters):
     result = []
     # Public identity must be verified. Bind all rows of the same author after a verified hit.
@@ -92,10 +99,7 @@ def select_comments(rows, filters):
         matched, kind, score = match_text(row['text'], filters)
         if not matched:
             continue
-        result.append({k:row[k] for k in ('comment_id','video_id','parent_id','text','created_at','ip_label')} | {
-            'nickname':row.get('display_name') or '',
-            'douyin_id':row.get('public_number') if row.get('resolved_state') == 'verified' else '',
-            'time_text':time_text(ts),'match_type':kind,'score':score})
+        result.append(format_comment(row, kind, score))
     return result
 
 
