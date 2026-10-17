@@ -176,7 +176,7 @@ async def test_unknown_denial_is_not_human_verification(tmp_path, response):
     await run_engine(db, runtime.args, runtime.stop, runtime.waiting, runtime=runtime)
     assert db.get_task(task['id'])['status'] == 'partial'
     assert not runtime.transport.policy.paused and not runtime.transport.policy.state.get('events')
-    assert runtime.transport.metrics['http_request_categories']['comments'] == 3
+    assert runtime.transport.metrics['http_request_categories']['comments'] == (1 if response.status_code == 403 else 3)
     assert not db.get_checkpoint(task['id'])['done']
 
 

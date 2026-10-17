@@ -8,13 +8,15 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
-from backend.crawler import ManualActionRequired, PageFailure, StopRequested, ControlledStop, validate_response
+from backend.crawler import ManualActionRequired, PageFailure, StopRequested, ControlledStop
+from backend.responses import (Kind, Outcome, MALFORMED, TEMPORARY, LoginRequired,
+    VerificationRequired, RequestFailure, NetworkPause, classify_http)
 from backend.stable_policy import StableRequestPolicy
 from backend.upstream import module
 
@@ -130,6 +132,9 @@ class DouyinAdapter:
         self._page_lock = asyncio.Lock()
         self._session_lock = asyncio.Lock()
         self._referer = ContextVar("douyin_request_referer", default=None)
+        self._response_scope = ContextVar('douyin_response_scope', default=None)
+        self._temporary_streak = 0
+        self._network_paused = False
         self._session_checked = self._cookies_checked = None
         self._logged_in = False
         self._manual_task = None
@@ -138,7 +143,7 @@ class DouyinAdapter:
         self.metrics = {"http_requests": 0, "http_seconds": 0.0, "signature_seconds": 0.0,
                         "session_checks": 0, "session_seconds": 0.0,
                         "cookie_refreshes": 0, "cookie_seconds": 0.0,
-                        "http_peak_active": 0, "http_request_categories": {}}
+                        "http_peak_active": 0, "http_request_categories": {}, "request_outcomes": {}}
 
     def performance_summary(self):
         return {**self.metrics, **self.policy.summary()}
@@ -146,6 +151,8 @@ class DouyinAdapter:
     def check_stop(self):
         if self.stop():
             raise StopRequested()
+        if self._network_paused:
+            raise NetworkPause()
         if self.deadline and time.monotonic() >= self.deadline:
             raise ControlledStop('已达到实测时间上限，断点已保存。')
         if self.page is not None and self.page.is_closed():
@@ -291,7 +298,7 @@ class DouyinAdapter:
         async with self._session_lock:
             if not await self.logged_in():
                 self.require_manual(challenge=False)
-                raise ManualActionRequired("登录已失效，请在专用浏览器重新登录。")
+                raise LoginRequired("登录已失效，请在专用浏览器重新登录。")
             await self.refresh_cookies()
 
     async def wait_for_login(self):
@@ -309,9 +316,18 @@ class DouyinAdapter:
 
     async def wait_for_manual(self):
         if self._manual_task is None or (self._manual_task.done() and self.policy.paused):
-            self.require_manual()
-            self._manual_task = asyncio.create_task(self._manual_prompt())
+            if not self.policy.paused:
+                self.require_manual()
+            challenge = not isinstance(self.policy, StableRequestPolicy) or self.policy.state.get('challenge_pending', True)
+            self._manual_task = asyncio.create_task(self._manual_prompt() if challenge else self._login_prompt())
         await asyncio.shield(self._manual_task)
+
+    async def _login_prompt(self):
+        await self.wait_for_login()
+        if isinstance(self.policy, StableRequestPolicy) and self.policy.state.get('challenge_pending'):
+            await self._manual_prompt()
+        else:
+            self.policy.resume()
 
     async def _manual_prompt(self):
         self.check_stop()
@@ -363,16 +379,68 @@ class DouyinAdapter:
             raise
         except (StopRequested, PageFailure):
             raise
-        except Exception as exc:
-            error = str(exc).lower()
-            if any(marker in error for marker in ("captcha", "verification", "验证码")):
-                self.require_manual(reason='接口明确要求人工验证')
-                raise ManualActionRequired("平台要求登录或人工验证，请在专用浏览器处理。") from None
-            self.policy.failure()
-            raise PageFailure("平台请求失败，请检查网络或稍后继续。") from None
+        except Exception:
+            # Signing/browser/client errors are not evidence of a network fault
+            # or captcha. Never inspect or persist arbitrary exception bodies.
+            self._complete_outcome(Outcome(Kind.PERMANENT,
+                '请求准备失败，已停止本次操作；请检查运行环境后继续。'), self.policy.generation)
+
+    @contextmanager
+    def response_scope(self):
+        """Delay the final success until the task has validated the whole page."""
+        scope = {'pending': None}
+        token = self._response_scope.set(scope)
+        try:
+            yield
+        except (StopRequested, asyncio.CancelledError, ManualActionRequired, RequestFailure):
+            raise
+        except Exception:
+            if scope['pending'] is not None:
+                _, generation = scope['pending']
+                scope['pending'] = None
+                self._complete_outcome(MALFORMED, generation)
+            raise
+        else:
+            self._flush_outcome()
+        finally:
+            self._response_scope.reset(token)
+
+    def _flush_outcome(self):
+        scope = self._response_scope.get()
+        if scope is not None and scope['pending'] is not None:
+            outcome, generation = scope['pending']
+            scope['pending'] = None
+            self._complete_outcome(outcome, generation)
+
+    def _complete_outcome(self, outcome, generation):
+        counts = self.metrics['request_outcomes']
+        counts[outcome.kind.value] = counts.get(outcome.kind.value, 0) + 1
+        if outcome.kind == Kind.TEMPORARY:
+            self._temporary_streak += 1
+        elif outcome.kind != Kind.MALFORMED and generation == self.policy.generation:
+            self._temporary_streak = 0
+        if outcome.kind == Kind.SUCCESS:
+            self.policy.success(generation=generation)
+            return
+        if outcome.kind == Kind.PRIVATE:
+            # A valid business result is neither a backoff nor an acceleration event.
+            return
+        if outcome.kind in (Kind.LOGIN, Kind.VERIFICATION):
+            self.require_manual(challenge=outcome.kind == Kind.VERIFICATION,
+                                reason='登录失效' if outcome.kind == Kind.LOGIN else '响应明确要求人工验证')
+            error = LoginRequired if outcome.kind == Kind.LOGIN else VerificationRequired
+            raise error(outcome.reason) from None
+        self.policy.failure(temporary=outcome.kind != Kind.PERMANENT,
+                            rate_limited=outcome.kind == Kind.RATE_LIMIT,
+                            retry_after=outcome.retry_after)
+        if self._temporary_streak >= 5:
+            self._network_paused = True
+            raise NetworkPause()
+        raise RequestFailure(outcome) from None
 
     async def http_request(self, method, url, *, raw=False, scheduled=False, **kwargs):
         """One HTTP attempt; the engine task extension owns bounded retries."""
+        self._flush_outcome()  # Commit a previous hop before following a short URL.
         if not scheduled:
             await self.policy.wait_turn()
         self.check_stop()
@@ -398,60 +466,31 @@ class DouyinAdapter:
         try:
             response = await self.interruptible(self.http_client.request(
                 method, url, timeout=kwargs.pop("timeout", getattr(self.client, "timeout", 25)), **kwargs))
-        except (StopRequested, asyncio.CancelledError):
+        except (StopRequested, asyncio.CancelledError, PageFailure):
             raise
-        except Exception:
-            self.policy.failure()
-            raise PageFailure("平台请求失败，请检查网络或稍后继续。") from None
+        except Exception as exc:
+            import httpx
+            outcome = TEMPORARY if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError,
+                httpx.RemoteProtocolError, httpx.ProxyError, TimeoutError, ConnectionError)) else Outcome(
+                Kind.PERMANENT, '请求执行失败，已停止本次操作并保留断点。')
+            self._complete_outcome(outcome, generation)
         finally:
             self._http_active -= 1
             self.metrics["http_seconds"] += time.monotonic() - began
-        if response.status_code == 429:
-            self.policy.failure(rate_limited=True, retry_after=response.headers.get("Retry-After"))
-            raise PageFailure("平台请求频率受限，已自动降速并等待后重试。")
-        if response.status_code == 401:
-            self.require_manual(challenge=False)
-            raise ManualActionRequired("登录已失效，请在专用浏览器重新登录。")
-        if response.status_code == 403:
-            # Only structured, explicit challenge evidence counts as a captcha.
-            try:
-                validate_response(response.json())
-            except ManualActionRequired:
-                self.require_manual(reason='HTTP 403 明确验证提示')
-                raise
-            except (ValueError, TypeError, PageFailure):
-                pass
-            self.policy.failure()
-            raise PageFailure("平台拒绝访问（HTTP 403），原因尚未明确；已降速并保留断点。")
-        if response.status_code >= 500:
-            self.policy.failure()
-            raise PageFailure("平台服务暂时不可用，已自动降速。")
-        if response.status_code >= 400:
-            self.policy.failure(temporary=False)
-            raise PageFailure(f"平台请求未成功（HTTP {response.status_code}），已保留断点。")
-        if raw:
-            self.policy.success(generation=generation)
-            return response
-        if response.text in ("", "blocked"):
-            self.policy.failure()
-            raise PageFailure("平台返回空数据或访问拒绝，尚无明确验证提示；已降速并保留断点。")
+        data = None
         try:
-            data = response.json()
+            if (response.status_code < 400 and not raw) or response.status_code == 403:
+                data = response.json()
         except (ValueError, TypeError):
-            self.policy.failure()
-            raise PageFailure("平台返回了非预期数据，已保留断点。") from None
-        try:
-            validate_response(data)
-        except ManualActionRequired:
-            reason = '搜索验证提示' if data.get('search_nil_info') else '响应包含验证提示'
-            self.require_manual(reason=reason)
-            raise
-        except PageFailure:
-            self.policy.failure()
-            # List-specific privacy responses must reach the collector intact.
+            pass
+        outcome = classify_http(response.status_code, data, category=category, raw=raw,
+                                retry_after=response.headers.get('Retry-After'))
+        scope = self._response_scope.get()
+        if scope is not None and outcome.kind in (Kind.SUCCESS, Kind.PRIVATE):
+            scope['pending'] = (outcome, generation)
         else:
-            self.policy.success(generation=generation)
-        return data
+            self._complete_outcome(outcome, generation)
+        return response if raw else data
 
     async def invoke_with_referer(self, referer, method, *args):
         # The public header remains useful for browser/debug state; the actual

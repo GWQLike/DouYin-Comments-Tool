@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Awaitable
-from backend.crawler import StopRequested, PageFailure, ManualActionRequired, _string, normalize_profile, validate_response
+from backend.crawler import StopRequested, PageFailure, ManualActionRequired, _string, normalize_profile
+from backend.responses import LoginRequired, RequestFailure, RequestRejected, explicit_list_private, validate_result
 from backend.likes import account_key, public_number, profile_visibility
 
 import re
-from backend.recommendations import recommendation_time, explicit_recommendations_private
+from backend.recommendations import recommendation_time
 
 class CommentTask:
     def __init__(self, db: Any, client: Any, task_id: str, *,
@@ -85,25 +86,33 @@ class CommentTask:
             generation = policy.generation if policy else None
             starts = policy.metrics['request_starts'] if policy else 0
             try:
-                # Poll for stop even while a network request is pending.
-                pending = asyncio.create_task(call())
-                try:
-                    while not pending.done():
+                scope = getattr(self.client, 'response_scope', nullcontext)
+                with scope():
+                    # Poll for stop even while a network request is pending.
+                    pending = asyncio.create_task(call())
+                    try:
+                        while not pending.done():
+                            self.check_stop()
+                            await asyncio.wait({pending}, timeout=0.2)
                         self.check_stop()
-                        await asyncio.wait({pending}, timeout=0.2)
-                    self.check_stop()
-                    return validate_response(pending.result())
-                finally:
-                    if not pending.done():
-                        pending.cancel()
-                    await asyncio.gather(pending, return_exceptions=True)
+                        return validate_result(pending.result())
+                    finally:
+                        if not pending.done():
+                            pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
             except StopRequested:
                 raise
-            except ManualActionRequired:
+            except ManualActionRequired as exc:
                 if not hasattr(self.client, "wait_for_manual"):
                     raise
+                if isinstance(exc, LoginRequired) and policy and not policy.paused:
+                    self.client.require_manual(challenge=False, reason='登录失效')
                 await self.client.wait_for_manual()
                 error = ManualActionRequired("人工处理后接口仍未恢复，请稍后继续。")
+            except RequestFailure as exc:
+                if not exc.retryable:
+                    raise RequestRejected(str(exc)) from None
+                error = exc
             except Exception as exc:
                 # A structurally invalid successful HTTP response is still a
                 # failed page. Back off once; transport failures already did so.
@@ -113,6 +122,10 @@ class CommentTask:
                 error = exc if isinstance(exc, PageFailure) else PageFailure("请求连续失败，请检查网络或稍后继续。")
         if isinstance(error, ManualActionRequired):
             raise error
+        if isinstance(error, RequestFailure):
+            # Transport retry exhaustion must not become a new paginator retry.
+            # Cursor/empty-page decisions remain the paginator's responsibility.
+            raise RequestRejected(str(error)) from None
         raise PageFailure(str(error)) from None
 
     async def parallel(self, items, operation) -> None:
@@ -201,7 +214,7 @@ class CommentTask:
                 return
             try:
                 response = await self.author_profile(author["sec_uid"])
-            except PageFailure:
+            except (PageFailure, RequestRejected):
                 return
             fields = normalize_profile(response, author)
             if fields is not None:
@@ -240,17 +253,17 @@ class CommentTask:
                         detail = await self.request(lambda: self.client.get_video_by_id(video_id))
                         if detail.get("desc"):
                             self.db.update_task(self.task_id, title=str(detail["desc"]))
-                    except PageFailure:
+                    except (PageFailure, RequestRejected):
                         pass  # Missing title is independent of comment coverage.
                 try:
                     with self.phase('main_comments'):
                         await self.collect_thread(video_id)
-                except PageFailure as exc:
+                except (PageFailure, RequestRejected) as exc:
                     errors.append(str(exc))
                 async def collect_reply(thread):
                     try:
                         await self.collect_thread(video_id, _string(thread["comment_id"]))
-                    except PageFailure as exc:
+                    except (PageFailure, RequestRejected) as exc:
                         errors.append(str(exc))
                 with self.phase('replies'):
                     await self.parallel(self.db.pending_threads(self.task_id), collect_reply)
@@ -269,7 +282,7 @@ class CommentTask:
         except ManualActionRequired as exc:
             self.db.update_task(self.task_id, status="waiting_login", error=str(exc))
             self.db.session_set("waiting", str(exc))
-        except PageFailure as exc:
+        except (PageFailure, RequestRejected) as exc:
             self.db.update_task(self.task_id, status="partial", error=str(exc))
 
 
@@ -301,7 +314,7 @@ class LikesTask(CommentTask):
         return min(18, remaining)
 
     def list_is_private(self, response: Any) -> bool:
-        return False
+        return explicit_list_private(response, self.list_kind)
 
     def action_time(self, raw: dict) -> int | None:
         # The favorite response has no verified per-item like timestamp.
@@ -426,7 +439,7 @@ class LikesTask(CommentTask):
                 return
             try:
                 profile = await self.author_profile(author["sec_uid"])
-            except PageFailure:
+            except (PageFailure, RequestRejected):
                 return
             verified = normalize_profile(profile, author)
             if verified:
@@ -461,7 +474,7 @@ class LikesTask(CommentTask):
                 try:
                     with self.phase('list'):
                         await self.collect_likes(target["sec_uid"], target["visibility"])
-                except PageFailure as exc:
+                except (PageFailure, RequestRejected) as exc:
                     error = str(exc)
                 if self.db.get_task(self.task_id)["status"] == "private":
                     return
@@ -478,7 +491,7 @@ class LikesTask(CommentTask):
         except ManualActionRequired as exc:
             self.db.update_task(self.task_id, status="waiting_login", error=str(exc))
             self.db.session_set("waiting", str(exc))
-        except PageFailure as exc:
+        except (PageFailure, RequestRejected) as exc:
             self.db.update_task(self.task_id, status="partial", error=str(exc), collection_complete=False)
 
 
@@ -490,9 +503,6 @@ class RecommendationsTask(LikesTask):
         # show_favorite_list controls likes only. No independently verified
         # recommendation permission flag is currently available on profiles.
         return 'unknown'
-
-    def list_is_private(self, response: Any) -> bool:
-        return explicit_recommendations_private(response)
 
     def action_time(self, raw: dict) -> int | None:
         return recommendation_time(raw, getattr(self, 'target_identity', {}))

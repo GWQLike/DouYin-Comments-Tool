@@ -1,6 +1,7 @@
 """Raw-page adapter; database records and cursor advance share one transaction."""
-from backend.crawler import PageFailure, normalize_comment, validate_response
+from backend.crawler import PageFailure, normalize_comment
 from backend.likes import normalize_liked_video
+from backend.responses import validate_result
 
 
 class CommentPages:
@@ -17,7 +18,7 @@ class CommentPages:
         self.task.db.reset_checkpoint(self.task.task_id, self.parent_id)
 
     def normalize(self, response, cursor):
-        response = validate_response(response)
+        response = validate_result(response)
         if response.get('has_more') not in (0, 1, '0', '1', False, True):
             raise PageFailure('平台未返回有效分页结束标志，已保留断点。')
         done = response['has_more'] in (0, '0', False)
@@ -67,7 +68,7 @@ class ActivityPages:
     def normalize(self, response, cursor):
         if self.task.list_is_private(response):
             return {'private': True}
-        response = validate_response(response)
+        response = validate_result(response)
         if response.get('has_more') not in (0, 1, '0', '1', False, True):
             raise PageFailure(f'{self.task.list_label}列表未返回有效分页结束标志，已保留断点。')
         raw = response.get('aweme_list')

@@ -200,6 +200,10 @@ class StableRequestPolicy(RequestPolicy):
 
     def pause(self, *, challenge=True, reason='人工验证'):
         if self.paused:
+            if challenge and not self.state.get('challenge_pending', True):
+                self._revision += 1
+                self.state['challenge_pending'] = True
+                self.risk_event(reason)
             return
         self._revision += 1
         self._successes = 0

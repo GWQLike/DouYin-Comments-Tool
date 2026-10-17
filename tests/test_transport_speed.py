@@ -50,7 +50,7 @@ async def test_business_challenge_pauses_before_collector_sees_response(tmp_path
 async def test_private_list_response_preserved_for_specific_collector(tmp_path):
     payload = {'status_code':20, 'status_msg':'该账号未公开推荐列表', 'aweme_list':[]}
     instance = adapter(tmp_path, lambda _: httpx.Response(200, json=payload))
-    assert await instance.http_request('GET', 'https://www.douyin.com/test') == payload
+    assert await instance.http_request('GET', 'https://www.douyin.com/aweme/v1/web/familiar/recommend/feed/') == payload
     assert not instance.policy.paused
     await instance.__aexit__()
 
