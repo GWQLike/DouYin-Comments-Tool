@@ -130,6 +130,28 @@ svg { flex-shrink: 0; }
 .stats-grid small { margin-left: 7px; font-size: 9px; font-weight: 400; color: #a0a992; letter-spacing: 0; }
 .video-list-stats { grid-template-columns: repeat(3, 1fr); }
 .stats-grid .text-stat { font-size: 17px; line-height: 27px; letter-spacing: 0; }
+.speed-card { padding: 18px 26px 15px; margin-bottom: 20px; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+.speed-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.speed-reading { display: flex; align-items: baseline; gap: 18px; }
+.speed-reading h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.speed-reading strong { font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--green); min-width: 90px; }
+.speed-reading small { margin-left: 6px; font-size: 10px; font-weight: 400; color: var(--muted); }
+.refresh-rate { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); }
+.refresh-rate select { font: inherit; color: var(--green); border: 1px solid var(--border); background: var(--cream); border-radius: 5px; padding: 5px 6px; cursor: pointer; }
+.refresh-rate select:focus-visible { outline: 3px solid #96bba5; outline-offset: 3px; }
+.speed-scale, .speed-axis { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.speed-scale { margin: 10px 0 5px; }
+.speed-axis { margin-top: 5px; }
+.speed-chart { display: block; width: 100%; height: 120px; overflow: hidden; background: #f8fbf7; border: 1px solid #cbdcc8; }
+.speed-grid { stroke: #dfebdc; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.speed-area { fill: #b8d7b0; fill-opacity: .36; }
+.speed-line { fill: none; stroke: #4b8054; stroke-width: 1.7; stroke-linejoin: round; }
+@media (max-width: 600px) {
+  .speed-card { padding: 15px 17px; }
+  .speed-heading { flex-wrap: wrap; gap: 8px; }
+  .speed-reading { gap: 12px; }
+  .refresh-rate { margin-left: auto; }
+}
 .task-progress { display: flex; justify-content: space-between; align-items: center; gap: 10px; min-height: 40px; margin: 0 -25px; padding: 10px 25px; background: #f7faf2; border-top: 1px solid #e8eddf; font-size: 10px; color: #8a9b78; }
 .task-progress > span { display: flex; align-items: center; gap: 7px; line-height: 1.6; }
 .pulse-dot { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; background: #94ad6c; border-radius: 50%; animation: pulse 1.8s infinite; }

@@ -6,6 +6,10 @@ import { Results, dateTime } from './Results';
 import { VideoListResults } from './VideoListResults';
 import { VideoListTask } from './VideoListTask';
 import { AuthorVerification } from './AuthorVerification';
+import { CollectionSpeed } from './CollectionSpeed';
+import { interruptSpeed, readRefreshRate, REFRESH_INTERVALS, sampleSpeed, saveRefreshRate, startPolling } from './monitor';
+import type { RefreshRate, SpeedHistory } from './monitor';
+import { createWorkspaceReader } from './workspacePolling';
 import { VIDEO_LIST_ACTIONS, VIDEO_LIST_LABELS } from './videoLists';
 import type { CommentPage, Filters, VideoPage, VideoListDraft, VideoListKind, Session, Task, TaskKind, TaskStatus } from './types';
 
@@ -52,6 +56,8 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [reload, setReload] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [refreshRate, setRefreshRate] = useState<RefreshRate>(readRefreshRate);
+  const [speedHistory, setSpeedHistory] = useState<SpeedHistory | null>(null);
   const sourceRef = useRef<HTMLTextAreaElement>(null);
   const accountRef = useRef<HTMLInputElement>(null);
   const task = tasks.find(item => item.id === selectedId && (item.kind ?? 'comments') === mode);
@@ -71,47 +77,53 @@ export default function App() {
   const anyActive = tasks.some(item => ACTIVE_STATUSES.includes(item.status));
 
   useEffect(() => {
-    const controller = new AbortController();
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      try {
-        const [nextTasks, nextSession] = await Promise.all([api<Task[]>('/tasks', { signal: controller.signal }), api<Session>('/session', { signal: controller.signal })]);
-        if (controller.signal.aborted) return;
-        setTasks(nextTasks);
-        setSession(nextSession);
-        setSelectedId(current => current && nextTasks.some(item => item.id === current && (item.kind ?? 'comments') === mode) ? current : nextTasks.find(item => (item.kind ?? 'comments') === mode)?.id ?? null);
-        setServiceError(null);
-      } catch (error) {
-        if (!controller.signal.aborted) setServiceError(errorMessage(error));
-      } finally {
-        if (!controller.signal.aborted) { setLoaded(true); timer = setTimeout(poll, 2500); }
-      }
-    }
-    void poll();
-    return () => { controller.abort(); clearTimeout(timer); };
-  }, [reload, mode]);
-
-  useEffect(() => {
-    if (!selectedId) { setLoading(false); setResultError(null); return; }
-    const controller = new AbortController();
-    setLoading(true);
+    let read = createWorkspaceReader(api);
+    let stop: (() => void) | undefined;
+    setLoading(Boolean(selectedId));
     setResultError(null);
-    async function poll() {
-      try {
-        const endpoint = listMode ? 'videos' : 'comments';
-        const data = await api<CommentPage | VideoPage>(`/tasks/${encodeURIComponent(selectedId!)}/${endpoint}?${resultQuery}`, { signal: controller.signal });
-        if (controller.signal.aborted) return;
+    const poll = async (signal: AbortSignal) => {
+      const snapshot = await read(selectedId, listMode, resultQuery, signal);
+      if (signal.aborted) return;
+      // Commit numbers, results and the speed sample in the same React update.
+      if (snapshot.tasks) {
+        const nextTasks = snapshot.tasks;
+        setTasks(nextTasks);
+        setSelectedId(current => current && nextTasks.some(item => item.id === current && (item.kind ?? 'comments') === mode) ? current : nextTasks.find(item => (item.kind ?? 'comments') === mode)?.id ?? null);
+      } else if (snapshot.task) {
+        const nextTask = snapshot.task;
+        setTasks(current => current.map(item => item.id === nextTask.id ? nextTask : item));
+      }
+      if (snapshot.session) setSession(snapshot.session);
+      if (snapshot.task) setSpeedHistory(current => sampleSpeed(current, snapshot.task!, snapshot.sampledAt));
+      if (snapshot.data) {
+        const data = snapshot.data;
         if (listMode) setVideoResultState({ key: resultKey, data: data as VideoPage });
         else setResultState({ key: resultKey, data: data as CommentPage });
-        setResultError(null);
         const maxPage = Math.max(1, Math.ceil(data.total / data.page_size));
         if (page > maxPage) setPage(maxPage);
-      } catch (error) { if (!controller.signal.aborted) setResultError(errorMessage(error)); }
-      finally { if (!controller.signal.aborted) setLoading(false); }
-    }
-    void poll();
-    return () => { controller.abort(); };
-  }, [selectedId, page, resultKey, resultQuery, listMode, task?.updated_at, reload]);
+      }
+      setServiceError(null); setResultError(null); setLoaded(true); setLoading(false);
+    };
+    const onError = (error: unknown) => {
+      const message = error instanceof DOMException && error.name === 'AbortError' ? '读取超时，正在重新连接本机服务。' : errorMessage(error);
+      setServiceError(message); setResultError(message); setLoaded(true); setLoading(false);
+      setSpeedHistory(interruptSpeed);
+    };
+    const resume = () => {
+      stop?.();
+      if (document.hidden) { setSpeedHistory(interruptSpeed); return; }
+      read = createWorkspaceReader(api);
+      stop = startPolling(poll, REFRESH_INTERVALS[refreshRate], onError);
+    };
+    resume();
+    document.addEventListener('visibilitychange', resume);
+    return () => { stop?.(); document.removeEventListener('visibilitychange', resume); };
+  }, [selectedId, page, resultKey, resultQuery, listMode, reload, mode, refreshRate]);
+
+  function changeRefreshRate(value: RefreshRate) {
+    setRefreshRate(value);
+    saveRefreshRate(value);
+  }
 
   useEffect(() => {
     if (!notice) return;
@@ -163,6 +175,7 @@ export default function App() {
     try {
       const nextTask = await api<Task>(`/tasks/${encodeURIComponent(task.id)}`, { method: 'PATCH', body: JSON.stringify({ verify_authors: enabled }) });
       setTasks(current => current.map(item => item.id === nextTask.id ? nextTask : item));
+      setReload(value => value + 1);
     } catch (error) { setActionError(errorMessage(error)); }
     finally { setPending(null); }
   }
@@ -268,6 +281,8 @@ export default function App() {
         <AuthorVerification task={task} active={active} anyActive={anyActive} pending={pending} onChange={enabled => void changeVerification(enabled)} onVerify={() => void taskAction('verify')} />
         {task.error ? <div className="task-error"><Icon name="info" size={15} /><span>{task.error}</span></div> : null}
       </section> : null}
+
+      {task ? <CollectionSpeed history={speedHistory?.taskId === task.id ? speedHistory : null} refreshRate={refreshRate} onRefreshRate={changeRefreshRate} stale={Boolean(serviceError)} /> : null}
 
       {!listMode ? <section className="filter-card" aria-labelledby="filter-title"><div className="section-heading"><h2 id="filter-title"><span className="step-label">02</span>筛选评论</h2><span className="section-caption">条件可组合 · 繁简自动匹配</span></div><form onSubmit={applyFilters}><div className="filter-main-row"><label className="field account-field"><span>抖音号<span className="field-hint">精确匹配</span></span><input value={draft.account} onChange={event => updateFilter('account', event.target.value)} placeholder="输入作者的公开抖音号" autoComplete="off" /></label><label className="field keyword-field"><span>评论关键词<span className="field-hint">繁简字形兼容</span></span><div className="input-with-icon"><Icon name="search" size={17} /><input value={draft.keyword} onChange={event => updateFilter('keyword', event.target.value)} placeholder="输入想查找的评论内容" /></div></label><fieldset className="mode-field"><legend>匹配方式</legend><div className="segmented"><label className={draft.mode === 'contains' ? 'checked' : ''}><input type="radio" name="mode" value="contains" checked={draft.mode === 'contains'} onChange={() => updateFilter('mode', 'contains')} />包含匹配</label><label className={draft.mode === 'fuzzy' ? 'checked' : ''}><input type="radio" name="mode" value="fuzzy" checked={draft.mode === 'fuzzy'} onChange={() => updateFilter('mode', 'fuzzy')} />近似匹配</label></div></fieldset></div>
         {draft.mode === 'fuzzy' ? <div className="fuzzy-settings"><label htmlFor="threshold">相似度阈值 <strong>{draft.threshold}</strong></label><input id="threshold" type="range" min="70" max="100" value={draft.threshold} onChange={event => updateFilter('threshold', Number(event.target.value))} /><span>数值越高越严格；1–3 字关键词仅做包含匹配</span></div> : null}

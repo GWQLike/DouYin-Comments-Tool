@@ -242,6 +242,10 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
     def create_recommendations(body: NewLikesTask):
         return create_account_list(body, 'recommendations')
 
+    @app.get('/api/tasks/{task_id}')
+    def task_status(task_id: str):
+        return task_or_404(task_id)
+
     @app.post('/api/tasks/{task_id}/start')
     def start_task(task_id: str):
         with manager.lock:
