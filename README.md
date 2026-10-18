@@ -35,8 +35,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-初始化脚本按锁文件安装依赖，并检查内核和 Chrome。它不会安装系统软件；缺少 Python 3.12 时，可先执行
-`uv python install 3.12`。
+初始化脚本按锁文件安装依赖，并检查内核和 Chrome。它不会安装系统软件；缺少 Python 3.12 时，
+可先执行`uv python install 3.12`。
 
 运行时请保留服务窗口。退出前先停止采集，再在服务窗口按 `Ctrl+C`。只关闭网页不会停止服务。
 
