@@ -11,3 +11,5 @@
 # Byte hashes are verified at startup. Preserve original line endings.
 vendor/MediaCrawler/** -text
 vendor/patches/baseline/** -text
+# Patch payloads include original CRLF and blank context lines.
+vendor/patches/workbench-*.patch -text whitespace=-blank-at-eol,cr-at-eol

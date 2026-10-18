@@ -37,6 +37,7 @@ def pooled_client_type(upstream, owner):
 
     class PooledClient(upstream):
         async def _signed(self, method, uri, values, headers):
+            owner.check_request_budget()
             async with owner.policy.slot():
                 async def prepare():
                     await owner.ensure_session()
@@ -438,16 +439,21 @@ class DouyinAdapter:
             raise NetworkPause()
         raise RequestFailure(outcome) from None
 
+    def check_request_budget(self):
+        self.check_stop()
+        if self.max_requests and self.metrics['http_requests'] >= self.max_requests:
+            raise ControlledStop('已达到实测请求或时间上限，断点已保存。')
+
     async def http_request(self, method, url, *, raw=False, scheduled=False, **kwargs):
         """One HTTP attempt; the engine task extension owns bounded retries."""
         self._flush_outcome()  # Commit a previous hop before following a short URL.
+        self.check_request_budget()
         if not scheduled:
             await self.policy.wait_turn()
         self.check_stop()
         generation = self.policy.generation
         began = time.monotonic()
-        if (self.max_requests and self.metrics['http_requests'] >= self.max_requests) or (self.deadline and time.monotonic() >= self.deadline):
-            raise ControlledStop('已达到实测请求或时间上限，断点已保存。')
+        self.check_request_budget()
         self.metrics["http_requests"] += 1
         # Use a fixed vocabulary; never log URLs, account IDs or query strings.
         category = "short_url" if raw else {

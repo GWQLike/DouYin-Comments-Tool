@@ -24,10 +24,13 @@ class ProtectionPause(ControlledStop):
 
 class StableRequestPolicy(RequestPolicy):
     RANGES = ((2, 4), (4, 8), (8, 16), (16, 32))
-    NORMAL_RANGES = ((2, 4), (1.5, 2.5), (1, 2))
+    NORMAL_RANGES = ((1.5, 2.5), (1, 1.5), (.8, 1.2))
+    ACCELERATION_SUCCESSES = 10
+    RECOVERY_SUCCESSES = 5
+    PROTECTED_RECOVERY_SUCCESSES = 20
 
     def __init__(self, state_path, *, wall_clock=time.time, uniform=random.uniform, **kwargs):
-        super().__init__(base_interval=2, max_concurrency=1, wall_clock=wall_clock, **kwargs)
+        super().__init__(base_interval=self.NORMAL_RANGES[0][0], max_concurrency=1, wall_clock=wall_clock, **kwargs)
         self.path, self.uniform = Path(state_path), uniform
         self.state = self.read_state(self.path)
         self.state.setdefault('level', 0)
@@ -91,6 +94,16 @@ class StableRequestPolicy(RequestPolicy):
     @property
     def interval(self):
         return self.interval_range[0] if hasattr(self, 'state') else 2
+
+    @property
+    def recovery_successes(self):
+        # A healthy response streak may recover ordinary backoff sooner. Time
+        # passing or restarting alone never resets it, or the separate risk guard.
+        now = self.wall_clock()
+        protected = (self.paused or self.state.get('halted') or
+                     self.state.get('cooldown_until', 0) > now or
+                     self.state.get('guard_until', 0) > now)
+        return self.PROTECTED_RECOVERY_SUCCESSES if protected else self.RECOVERY_SUCCESSES
 
     def check_control(self):
         self.check_stop()
@@ -186,12 +199,12 @@ class StableRequestPolicy(RequestPolicy):
         recovering = bool(self._level)
         if self._level:
             self._successes += 1
-            if self._successes >= 20:
+            if self._successes >= self.recovery_successes:
                 self._successes = 0
                 self._level -= 1
         elif self.state.get('guard_until', 0) <= self.wall_clock():
             self._normal_successes += 1
-            if self._normal_successes >= 20:
+            if self._normal_successes >= self.ACCELERATION_SUCCESSES:
                 self._normal_successes = 0
                 self._normal_step = min(self._normal_step + 1, len(self.NORMAL_RANGES) - 1)
         self._record_speed_change(previous, 'success_recovery' if previous > 2 else 'success_acceleration')
@@ -230,6 +243,8 @@ class StableRequestPolicy(RequestPolicy):
 
     def summary(self):
         return {**super().summary(), 'speed_mode': 'moderate',
+                'backoff_level': self._level,
+                'recovery_successes_remaining': max(0, self.recovery_successes - self._successes) if self._level else 0,
                 'acceleration_allowed': not self.paused and not self._level and self.state.get('guard_until', 0) <= self.wall_clock(),
                 'interval_range_seconds': self.interval_range, 'control_events': self.state.get('control_events', []),
                 **self.public_state(self.path, self.wall_clock())}

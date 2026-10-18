@@ -13,6 +13,7 @@ from backend.migrations import DatabaseMigrationError, Migration
 
 
 FIXTURE = Path(__file__).parent / 'fixtures' / 'database_v0.sql'
+CURRENT_VERSION = migrations.MIGRATIONS[-1].version
 
 
 def legacy_database(path):
@@ -29,6 +30,14 @@ def backups(path):
     return sorted((path.parent / 'backups').glob('*/backup.sqlite3'))
 
 
+def assert_existing_data_preserved(old_path, new_path):
+    with closing(sqlite3.connect(old_path)) as old, closing(sqlite3.connect(new_path)) as new:
+        for (table,) in old.execute("SELECT name FROM sqlite_schema WHERE type='table'"):
+            columns = ','.join(row[1] for row in old.execute(f'PRAGMA table_info({table})'))
+            assert new.execute(f'SELECT {columns} FROM {table} ORDER BY rowid').fetchall() == old.execute(
+                f'SELECT {columns} FROM {table} ORDER BY rowid').fetchall()
+
+
 @pytest.mark.parametrize('initial', ['missing', 'zero_bytes', 'sqlite_empty'])
 def test_new_database_needs_no_backup(tmp_path, initial):
     path = tmp_path / 'new.sqlite3'
@@ -38,7 +47,7 @@ def test_new_database_needs_no_backup(tmp_path, initial):
         with closing(sqlite3.connect(path)) as con:
             con.execute('VACUUM')
     db = Database(path)
-    assert snapshot(path)[0] == 1
+    assert snapshot(path)[0] == CURRENT_VERSION
     assert db.list_tasks() == []
     assert db.session_get() == {'status': 'logged_out', 'error': None}
     assert db.create_task('test')['verify_authors'] is False
@@ -65,7 +74,9 @@ def test_upgrade_backs_up_committed_pages_and_preserves_every_record(tmp_path, j
         db = Database(path)
         saved, = backups(path)
         assert snapshot(saved) == before
-        assert snapshot(path) == (1, before[1])
+        assert snapshot(path)[0] == CURRENT_VERSION
+        assert_existing_data_preserved(saved, path)
+        upgraded = snapshot(path)
         assert db.get_task('comments')['verify_authors'] is False
         assert db.get_task('likes')['verify_authors'] is True
         assert db.get_task('recommendations')['list_order'] == 'activity'
@@ -77,7 +88,7 @@ def test_upgrade_backs_up_committed_pages_and_preserves_every_record(tmp_path, j
         for _ in range(3):
             Database(path)
         assert backups(path) == [saved]
-        assert snapshot(path) == (1, before[1])
+        assert snapshot(path) == upgraded
 
 
 def test_upgrade_of_older_columns_preserves_legacy_defaults(tmp_path):
@@ -108,20 +119,20 @@ def test_ordered_future_migrations_run_once_with_one_backup(tmp_path, monkeypatc
 
     def version_two(con):
         calls.append(2)
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert con.execute('PRAGMA user_version').fetchone()[0] == CURRENT_VERSION
         con.execute('ALTER TABLE tasks ADD COLUMN migration_probe INTEGER DEFAULT 0')
         con.execute('UPDATE tasks SET migration_probe=7')
 
     def version_three(con):
         calls.append(3)
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert con.execute('PRAGMA user_version').fetchone()[0] == CURRENT_VERSION + 1
         assert con.execute('SELECT migration_probe FROM tasks').fetchone()[0] == 7
         con.execute('CREATE INDEX migration_probe_idx ON tasks(migration_probe)')
 
     monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (
-        Migration(2, version_two), Migration(3, version_three)))
+        Migration(CURRENT_VERSION + 1, version_two), Migration(CURRENT_VERSION + 2, version_three)))
     Database(path)
-    assert snapshot(path)[0] == 3
+    assert snapshot(path)[0] == CURRENT_VERSION + 2
     assert snapshot(backups(path)[0]) == before
     Database(path)
     assert calls == [2, 3]
@@ -149,7 +160,7 @@ def test_failure_rolls_back_all_versions_ddl_data_and_version(tmp_path, monkeypa
             con.execute("INSERT INTO authors(task_id,author_key) VALUES('missing','invalid')")
 
     monkeypatch.setattr(migrations, 'MIGRATIONS', original + (
-        Migration(2, version_two), Migration(3, version_three)))
+        Migration(CURRENT_VERSION + 1, version_two), Migration(CURRENT_VERSION + 2, version_three)))
     with pytest.raises(DatabaseMigrationError, match='启动已停止') as error:
         Database(path)
     assert snapshot(path) == before
@@ -158,9 +169,9 @@ def test_failure_rolls_back_all_versions_ddl_data_and_version(tmp_path, monkeypa
     assert snapshot(saved) == before
     original_bytes = saved.read_bytes()
     # Retrying a fixed migration creates a new backup; it never overwrites the old one.
-    monkeypatch.setattr(migrations, 'MIGRATIONS', original + (Migration(2, version_two),))
+    monkeypatch.setattr(migrations, 'MIGRATIONS', original + (Migration(CURRENT_VERSION + 1, version_two),))
     Database(path)
-    assert snapshot(path)[0] == 2
+    assert snapshot(path)[0] == CURRENT_VERSION + 1
     assert len(backups(path)) == 2
     assert saved.read_bytes() == original_bytes
 
@@ -172,7 +183,7 @@ def test_new_database_failure_rolls_back_created_tables(tmp_path, monkeypatch):
         con.execute('CREATE TABLE failed_probe(id INTEGER)')
         raise RuntimeError('injected')
 
-    monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(2, fail),))
+    monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(CURRENT_VERSION + 1, fail),))
     with pytest.raises(DatabaseMigrationError):
         Database(path)
     with closing(sqlite3.connect(path)) as con:
@@ -190,7 +201,7 @@ def test_interrupted_migration_rolls_back_before_propagating_interrupt(tmp_path,
         con.execute("UPDATE checkpoints SET cursor='0'")
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(2, interrupt),))
+    monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(CURRENT_VERSION + 1, interrupt),))
     with pytest.raises(KeyboardInterrupt):
         Database(path)
     assert snapshot(path) == before
@@ -207,7 +218,7 @@ def test_migration_failure_prevents_service_manager_startup(tmp_path, monkeypatc
     def fail(con):
         raise RuntimeError('injected')
 
-    monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(2, fail),))
+    monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(CURRENT_VERSION + 1, fail),))
     with pytest.raises(DatabaseMigrationError):
         create_app(tmp_path, manager_factory=lambda *args: calls.append(args))
     assert calls == []
@@ -264,7 +275,8 @@ def test_backup_can_restore_into_a_separate_database_and_upgrade_again(tmp_path)
             source.backup(destination)
     assert snapshot(restored) == before
     db = Database(restored)
-    assert snapshot(restored) == (1, before[1])
+    assert snapshot(restored)[0] == CURRENT_VERSION
+    assert_existing_data_preserved(saved, restored)
     assert len(db.read_comments('comments')) == 2
     assert db.get_checkpoint('comments')['cursor'] == 40
     assert snapshot(saved) == before
@@ -300,7 +312,7 @@ def test_two_processes_only_adopt_and_back_up_once(tmp_path):
     with ThreadPoolExecutor(max_workers=2) as workers:
         results = list(workers.map(lambda _: start(), range(2)))
     assert all(result.returncode == 0 for result in results), [result.stderr for result in results]
-    assert snapshot(path)[0] == 1
+    assert snapshot(path)[0] == CURRENT_VERSION
     assert len(backups(path)) == 1
 
 

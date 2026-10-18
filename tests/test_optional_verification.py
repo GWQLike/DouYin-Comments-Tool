@@ -42,14 +42,13 @@ def test_option_defaults_patch_conflict_refresh_and_verify(tmp_path, kind):
 
 
 def test_existing_task_migration_preserves_opt_in_and_new_task_opts_out(tmp_path):
+    from test_migrations import legacy_database
     path = tmp_path / 'legacy.db'
-    db = Database(path)
-    tid = db.create_task('old')['id']
-    db.save_page(tid, '', [row()], 123, False)
+    legacy_database(path)
+    tid = 'comments'
     with sqlite3.connect(path) as con:
         con.execute('ALTER TABLE tasks DROP COLUMN verify_authors')
-        # This fixture represents a release before both the option and schema versions.
-        con.execute('PRAGMA user_version=0')
+        con.execute("UPDATE checkpoints SET cursor='123' WHERE task_id=? AND thread_id=''", (tid,))
     db = Database(path)
     assert db.get_task(tid)['verify_authors'] is True
     assert db.get_checkpoint(tid)['cursor'] == 123

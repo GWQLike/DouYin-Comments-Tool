@@ -1,8 +1,8 @@
-# MediaCrawler workbench compatibility patch 1
+# MediaCrawler workbench compatibility patch 2
 
 Base: `5d547f45862ca2d4b404e5a51775879d579b29d4` (no upstream upgrade).
 
-`workbench-1.patch` records the changes against the untouched source copies in
+`workbench-2.patch` records the changes against the untouched source copies in
 `baseline/`. `manifest.json` records SHA-256 values of original and patched files.
 The installation check and every new worker verify patched files before import.
 Upstream copyright/license headers are preserved.
@@ -15,8 +15,11 @@ Explicit interfaces:
 - `DouYinClient.prepare_request(...)` and optional `signer`: public signing hook,
   replacing private-function cloning. The pinned signing algorithm is unchanged.
 - `pagination.collect_pages(fetch, hooks)`: stop checks, checkpoint resume,
-  raw-response normalization, atomic page callbacks, bounded stale-cursor recovery.
-  Hook exceptions propagate; no extra request sleeps or hidden retries.
+  raw-response normalization and atomic page callbacks. Request failures preserve
+  the saved cursor. Three consecutive empty, repeated or stalled pages stop at
+  the last safe position. There is no verified cursor-invalid response for these
+  pinned endpoints, so none currently enables automatic replay from page one.
+  Hook exceptions propagate; request retry budgets remain owned by the host.
 - `DouYinLogin(manual_login=...)`: manual login extension, without slider solving.
 - `CDPBrowserManager(connection_url=...)`: loopback-only attachment; cleanup does
   not close an externally owned browser/context. The worker stops its driver.
@@ -34,3 +37,7 @@ upstream dependencies or conflicting upstream FastAPI pins were installed.
 
 To regenerate the patch after a reviewed compatibility change:
 `python vendor/patches/build_patch.py`. Do not change the baseline copies.
+
+Version 2 removes the previous fallback replay and checks cancellation again
+before saving a fetched page. Reply-growth evidence and its database migration
+are implemented in the host, without changing upstream endpoint parameters.

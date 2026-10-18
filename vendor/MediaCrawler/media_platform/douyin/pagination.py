@@ -1,15 +1,19 @@
-"""Workbench compatibility v1: explicit resumable page hooks.
+"""Workbench compatibility v2: preserve cursors without proven invalidation.
 
-No storage implementation, sleeps or retries are hidden here. A page is committed
-by the host before its cursor advances. Failure/cancellation never marks done.
+The host owns storage, pacing and request retry budgets. A page is committed
+before its cursor advances. Failure/cancellation never marks done.
 """
+import hashlib
+
+
 async def collect_pages(fetch, hooks):
     checkpoint = hooks.checkpoint()
     if checkpoint.get('done'):
         return
     cursor = checkpoint.get('cursor', 0)
-    resumed, restarted, stalls = bool(cursor), False, 0
+    stalls = 0
     visited = {str(cursor)}
+    pages = set()
     while True:
         hooks.check_stop()
 
@@ -17,33 +21,29 @@ async def collect_pages(fetch, hooks):
             raw = await fetch(cursor)
             return hooks.normalize(raw, cursor)
 
-        try:
-            page = await hooks.request(request_page)
-        except hooks.page_error:
-            if resumed and not restarted:
-                hooks.restart()
-                cursor, visited, stalls, restarted = 0, {'0'}, 0, True
-                continue
-            raise
+        # No verified cursor-invalid response exists for the pinned endpoints.
+        # Transport/shape failures must keep the last committed position.
+        page = await hooks.request(request_page)
+        hooks.check_stop()
         if page.get('private'):
             hooks.private()
             return
         rows, done, next_cursor = page['rows'], page['done'], page['next_cursor']
         raw_count = len(rows)
+        identifiers = sorted({str(row.get('comment_id') or row.get('video_id') or '') for row in rows})
+        fingerprint = hashlib.sha256('\0'.join(identifiers).encode('utf-8')).digest()
         rows = hooks.filter(rows, done)
+        hooks.check_stop()
         if done:
             hooks.commit(rows, next_cursor, True)
             return
-        if not raw_count or not page['has_cursor'] or str(next_cursor) in visited:
+        if not raw_count or not page['has_cursor'] or str(next_cursor) in visited or fingerprint in pages:
             hooks.commit(rows, cursor, False)
             stalls += 1
             if stalls >= 3:
-                if resumed and not restarted:
-                    hooks.restart()
-                    cursor, visited, stalls, restarted = 0, {'0'}, 0, True
-                    continue
-                raise hooks.page_error('连续三次空页或分页游标停滞，采集尚未完成，可稍后继续。')
+                raise hooks.page_error('连续三次空页、重复页或分页游标停滞，无法确认游标已失效；已保留原断点，可稍后继续。')
             continue
         hooks.commit(rows, next_cursor, False)
         cursor, stalls = next_cursor, 0
         visited.add(str(cursor))
+        pages.add(fingerprint)

@@ -137,16 +137,45 @@ class Database:
             con.execute("INSERT INTO checkpoints(task_id,thread_id,cursor,done,restarts) VALUES(?,?,'0',0,1) ON CONFLICT(task_id,thread_id) DO UPDATE SET cursor='0',done=0,restarts=restarts+1", (task_id, str(thread_id)))
 
     def save_page(self, task_id, thread_id, comments, next_cursor, done):
+        thread_id = str(thread_id)
         cols = ('comment_id','video_id','parent_id','text','created_at','ip_label','nickname','douyin_id','uid','sec_uid','author_key','identity_state','reply_count')
         with self.connection() as con:
             for item in comments:
                 c = dict(item)
+                parent_id = str(c.get('parent_id') or '')
+                if not parent_id and (c.get('reply_count') or 0) > 0:
+                    self._observe_replies(con, task_id, c['comment_id'], c['reply_count'])
+                elif parent_id and parent_id != thread_id:
+                    exists = con.execute('SELECT 1 FROM comments WHERE task_id=? AND comment_id=?',
+                                         (task_id, c['comment_id'])).fetchone()
+                    if not exists:
+                        self._observe_replies(con, task_id, parent_id, new_preview=True)
                 c.setdefault('author_key', c.get('uid') or c.get('sec_uid') or f"comment:{c['comment_id']}")
                 values = [c.get(k, 0 if k == 'reply_count' else None if k == 'created_at' else 'unknown' if k == 'identity_state' else '') for k in cols]
                 con.execute('INSERT INTO comments(task_id,' + ','.join(cols) + ') VALUES(' + ','.join('?' for _ in range(len(cols)+1)) + ') ON CONFLICT(task_id,comment_id) DO UPDATE SET ' + ','.join(f'{k}=excluded.{k}' for k in cols if k != 'comment_id'), (task_id, *values))
                 self._save_author(con, task_id, c['author_key'], **{k:c.get(k) or '' for k in ('uid','sec_uid','douyin_id','nickname','identity_state')})
             con.execute('INSERT INTO checkpoints(task_id,thread_id,cursor,done) VALUES(?,?,?,?) ON CONFLICT(task_id,thread_id) DO UPDATE SET cursor=excluded.cursor,done=excluded.done', (task_id, str(thread_id), str(next_cursor), bool(done)))
+            if thread_id:
+                con.execute('''UPDATE checkpoints SET reply_count_seen=MAX(COALESCE(reply_count_seen,0),
+                    COALESCE((SELECT reply_count FROM comments WHERE task_id=? AND comment_id=? AND parent_id=''),0)),
+                    reply_rows_seen=CASE WHEN ? THEN (SELECT COUNT(*) FROM comments WHERE task_id=? AND parent_id=?)
+                        ELSE reply_rows_seen END WHERE task_id=? AND thread_id=?''',
+                    (task_id, thread_id, bool(done), task_id, thread_id, task_id, thread_id))
             con.execute('UPDATE tasks SET updated_at=? WHERE id=?', (time.time(),task_id))
+
+    @staticmethod
+    def _observe_replies(con, task_id, thread_id, declared_count=0, *, new_preview=False):
+        # A completed thread only reopens for new evidence, never because the
+        # declared count differs from the number of replies the server supplied.
+        changed = con.execute('''INSERT INTO checkpoints(task_id,thread_id,reply_count_seen)
+            VALUES(?,?,?) ON CONFLICT(task_id,thread_id) DO UPDATE SET
+                cursor=CASE WHEN done=1 THEN '0' ELSE cursor END,
+                restarts=restarts+CASE WHEN done=1 THEN 1 ELSE 0 END, done=0,
+                reply_count_seen=MAX(COALESCE(reply_count_seen,0),excluded.reply_count_seen)
+            WHERE excluded.reply_count_seen>COALESCE(reply_count_seen,0) OR ?''',
+            (task_id, str(thread_id), declared_count, new_preview)).rowcount
+        if changed:
+            con.execute('UPDATE tasks SET collection_complete=0 WHERE id=?', (task_id,))
 
     @staticmethod
     def _save_author(con, task_id, author_key, *, profile_verified=False, **fields):
@@ -186,14 +215,16 @@ class Database:
         with self.connection() as con:
             return [dict(r) for r in con.execute('''SELECT c.comment_id,c.reply_count
                 FROM comments c LEFT JOIN checkpoints p ON p.task_id=c.task_id AND p.thread_id=c.comment_id
-                WHERE c.task_id=? AND c.parent_id='' AND c.reply_count>0 AND COALESCE(p.done,0)=0''', (task_id,))]
+                WHERE c.task_id=? AND c.parent_id='' AND (c.reply_count>0 OR p.thread_id IS NOT NULL)
+                    AND COALESCE(p.done,0)=0''', (task_id,))]
 
     def comments_complete(self, task_id):
         with self.connection() as con:
             return bool(con.execute('''SELECT EXISTS(SELECT 1 FROM checkpoints WHERE task_id=? AND thread_id='' AND done=1)
                 AND NOT EXISTS(SELECT 1 FROM comments c LEFT JOIN checkpoints p
                     ON p.task_id=c.task_id AND p.thread_id=c.comment_id
-                    WHERE c.task_id=? AND c.parent_id='' AND c.reply_count>0 AND COALESCE(p.done,0)=0)''', (task_id, task_id)).fetchone()[0])
+                    WHERE c.task_id=? AND c.parent_id='' AND (c.reply_count>0 OR p.thread_id IS NOT NULL)
+                        AND COALESCE(p.done,0)=0)''', (task_id, task_id)).fetchone()[0])
 
     COMMENT_SELECT = '''SELECT c.*,
         COALESCE(NULLIF(a.douyin_id,''),c.douyin_id) AS public_number,

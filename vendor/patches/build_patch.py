@@ -18,7 +18,7 @@ for name in names:
     patches.extend(difflib.unified_diff(old.decode('utf-8-sig').splitlines(keepends=True),
         new.decode('utf-8-sig').splitlines(keepends=True),
         fromfile='a/' + name if old else '/dev/null', tofile='b/' + name))
-(root / 'workbench-1.patch').write_text(''.join(patches), encoding='utf-8', newline='\n')
+(root / 'workbench-2.patch').write_text(''.join(patches), encoding='utf-8', newline='\n')
 (root / 'manifest.json').write_text(json.dumps({'upstream_commit': '5d547f45862ca2d4b404e5a51775879d579b29d4',
-    'patch_version': 'workbench.1', 'files': entries}, indent=2), encoding='utf-8')
+    'patch_version': 'workbench.2', 'files': entries}, indent=2), encoding='utf-8')
 print(f'Compatibility patch recorded: {len(entries)} files')

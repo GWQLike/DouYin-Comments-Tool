@@ -101,8 +101,26 @@ def _adopt_legacy_schema(con: sqlite3.Connection) -> None:
     con.execute("INSERT OR IGNORE INTO session VALUES(1,'logged_out',NULL)")
 
 
+_REPLY_INDEXES = {'comments_parent': ('comments', 'task_id,parent_id')}
+
+
+def _reply_observations(con: sqlite3.Connection) -> None:
+    con.execute('ALTER TABLE checkpoints ADD COLUMN reply_count_seen INTEGER')
+    con.execute('ALTER TABLE checkpoints ADD COLUMN reply_rows_seen INTEGER')
+    for name, (table, columns) in _REPLY_INDEXES.items():
+        con.execute(f'CREATE INDEX {name} ON {table}({columns})')
+    # Historical completion is preserved. Existing rows supply a conservative
+    # baseline, not a claim that the old fetch observed these exact counts.
+    con.execute('''UPDATE checkpoints SET
+        reply_count_seen=COALESCE((SELECT MAX(0,c.reply_count) FROM comments c
+            WHERE c.task_id=checkpoints.task_id AND c.comment_id=checkpoints.thread_id AND c.parent_id=''),0),
+        reply_rows_seen=(SELECT COUNT(*) FROM comments c
+            WHERE c.task_id=checkpoints.task_id AND c.parent_id=checkpoints.thread_id)
+        WHERE thread_id!='' AND task_id IN (SELECT id FROM tasks WHERE kind='comments')''')
+
+
 # Append new versions; never rewrite an applied migration to upgrade existing data.
-MIGRATIONS = (Migration(1, _adopt_legacy_schema),)
+MIGRATIONS = (Migration(1, _adopt_legacy_schema), Migration(2, _reply_observations))
 
 _REQUIRED_COLUMNS = {
     'tasks': 'id source_url video_id title status created_at updated_at error stop_requested '
@@ -111,7 +129,7 @@ _REQUIRED_COLUMNS = {
     'comments': 'task_id comment_id video_id parent_id text created_at ip_label nickname '
                 'douyin_id uid sec_uid author_key identity_state reply_count',
     'authors': 'task_id author_key uid sec_uid douyin_id nickname identity_state',
-    'checkpoints': 'task_id thread_id cursor done restarts',
+    'checkpoints': 'task_id thread_id cursor done restarts reply_count_seen reply_rows_seen',
     'session': 'id status error',
     'liked_videos': 'task_id video_id title author_name author_douyin_id created_at video_url '
                     'author_key uid sec_uid action_at collected_order',
@@ -132,7 +150,7 @@ def _validate_schema(con: sqlite3.Connection) -> None:
         primary = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
         if primary != _PRIMARY_KEYS[table]:
             raise DatabaseMigrationError(f'数据库表 {table} 的主键不匹配')
-    for name, (table, columns) in _INDEXES.items():
+    for name, (table, columns) in {**_INDEXES, **_REPLY_INDEXES}.items():
         actual = con.execute(f'PRAGMA index_info({name})').fetchall()
         expected = [column.strip().split()[0] for column in columns.split(',')]
         indexes = {row[1] for row in con.execute(f'PRAGMA index_list({table})')}

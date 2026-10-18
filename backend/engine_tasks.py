@@ -355,14 +355,6 @@ class LikesTask(CommentTask):
         if limit and len(self._video_ids) >= limit and not done:
             raise PageFailure(f"已达到本次 {limit} 条采集上限，已停止；当前结果不是完整列表。")
 
-    def restart_list_checkpoint(self) -> None:
-        # A changed first page cannot be appended to an activity-ordered batch:
-        # newly liked/recommended videos would appear after older saved rows.
-        if self.db.get_task(self.task_id)['list_order'] == 'activity':
-            action = '点赞' if self.list_kind == 'likes' else '推荐'
-            raise PageFailure(f"无法按原分页位置继续，已保留结果和断点；为保持{action}顺序，请新建批次重新采集。")
-        self.db.reset_checkpoint(self.task_id, self.list_kind)
-
     async def verify_target(self, account: str, candidate: dict) -> dict | None:
         sec_uid = _string(candidate.get("sec_uid"))
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", sec_uid):

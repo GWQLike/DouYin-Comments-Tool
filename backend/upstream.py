@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 
 VENDOR_ROOT = Path(__file__).resolve().parents[1] / 'vendor' / 'MediaCrawler'
-ENGINE_VERSION = '5d547f45862ca2d4b404e5a51775879d579b29d4+workbench.1'
+ENGINE_VERSION = '5d547f45862ca2d4b404e5a51775879d579b29d4+workbench.2'
 
 
 @lru_cache(maxsize=1)

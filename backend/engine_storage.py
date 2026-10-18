@@ -14,9 +14,6 @@ class CommentPages:
     def checkpoint(self):
         return self.task.db.get_checkpoint(self.task.task_id, self.parent_id)
 
-    def restart(self):
-        self.task.db.reset_checkpoint(self.task.task_id, self.parent_id)
-
     def normalize(self, response, cursor):
         response = validate_result(response)
         if response.get('has_more') not in (0, 1, '0', '1', False, True):
@@ -55,7 +52,6 @@ class ActivityPages:
     def __init__(self, task, visibility):
         self.task, self.visibility = task, visibility
         self.request, self.check_stop = task.request, task.check_stop
-        self.restart = task.restart_list_checkpoint
         self.commit = task.save_list_page
 
     def checkpoint(self):

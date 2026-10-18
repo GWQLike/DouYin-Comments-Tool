@@ -31,14 +31,14 @@ async def test_base_pacing_and_cross_task_last_start(tmp_path):
     await first.wait_turn()
     assert clock.now == 10000
     await first.wait_turn()
-    assert clock.now == pytest.approx(10002)
+    assert clock.now == pytest.approx(10001.5)
     next_task = policy(first.path, clock)
     await next_task.wait_turn()
-    assert clock.now == pytest.approx(10004)
-    assert first.interval_range == (2, 4)
+    assert clock.now == pytest.approx(10003)
+    assert first.interval_range == (1.5, 2.5)
 
 
-def test_failures_and_twenty_successes_restore_one_step(tmp_path):
+def test_failures_and_five_successes_restore_one_step(tmp_path):
     p = policy(tmp_path / 'control.json', Clock())
     for expected in [(4, 8), (8, 16), (16, 32), (16, 32)]:
         p.failure()
@@ -47,7 +47,7 @@ def test_failures_and_twenty_successes_restore_one_step(tmp_path):
     p.failure()
     p.success(old)
     assert p._successes == 0
-    for _ in range(19):
+    for _ in range(4):
         p.success(p.generation)
     assert p.interval_range == (16, 32)
     p.success(p.generation)

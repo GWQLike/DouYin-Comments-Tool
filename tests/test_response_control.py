@@ -102,7 +102,7 @@ async def test_login_recovery_does_not_record_captcha_or_cooldown(tmp_path, init
         assert not instance.policy.state.get('guard_until')
         assert not instance.policy.state.get('cooldown_until')
         assert instance.policy._level == 0
-        assert clock.now == pytest.approx(10002)
+        assert clock.now == pytest.approx(10001.5)
 
 
 async def test_repeated_login_requires_no_risk_protection_and_stops_after_three_attempts(tmp_path):
@@ -287,7 +287,7 @@ async def test_late_success_cannot_clear_a_new_failure_streak(tmp_path):
 
 async def test_bad_page_cannot_accelerate_before_backoff_or_double_count(tmp_path):
     async with harness(tmp_path, lambda _: httpx.Response(200, json={'status_code': 0})) as (instance, task, _):
-        for _ in range(19):
+        for _ in range(9):
             instance.policy.success(instance.policy.generation)
         async def invalid_page():
             await instance.http_request('GET', 'https://www.douyin.com/test')
@@ -318,7 +318,7 @@ async def test_private_list_does_not_slow_next_worker(tmp_path, kind, status):
     assert runtime.transport.policy.metrics['temporary_failures'] == 0
     assert runtime.transport.policy._level == 0
     next_policy = policy(runtime.transport.policy.path, runtime.transport.clock)
-    assert next_policy.interval_range == (2, 4)
+    assert next_policy.interval_range == (1.5, 2.5)
     assert not next_policy.state.get('events')
 
 

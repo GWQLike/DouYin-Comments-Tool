@@ -1,6 +1,6 @@
 {
   "upstream_commit": "5d547f45862ca2d4b404e5a51775879d579b29d4",
-  "patch_version": "workbench.1",
+  "patch_version": "workbench.2",
   "files": {
     "media_platform/douyin/client.py": {
       "baseline_sha256": "51a9b11785c28ab8431eace09f72b79450c5487a6316707ee1812c6c4b8ddfa2",
@@ -28,7 +28,7 @@
     },
     "media_platform/douyin/pagination.py": {
       "baseline_sha256": null,
-      "patched_sha256": "face864b4105f950c08001ba541443d11d2cc7eb39530eba72f348ae4f63529b"
+      "patched_sha256": "0d6a36d7fceb1d46355f36d866ca47ad9a22fc5cb7ca9ca8e43ebf19505d7d9d"
     }
   }
 }
