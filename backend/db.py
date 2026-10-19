@@ -54,7 +54,9 @@ class Database:
             result = dict(row)
             counts = con.execute("SELECT SUM(parent_id='') AS main_count,SUM(parent_id!='') AS reply_count FROM comments WHERE task_id=?", (task_id,)).fetchone()
             result.update({k: counts[k] or 0 for k in ('main_count', 'reply_count')})
-            result['unknown_authors'] = con.execute("SELECT COUNT(*) FROM authors WHERE task_id=? AND (identity_state!='verified' OR douyin_id='')", (task_id,)).fetchone()[0]
+            result['unknown_authors'] = con.execute('''SELECT COUNT(*) FROM authors a WHERE task_id=?
+                AND (identity_state!='verified' OR douyin_id='')
+                AND EXISTS(SELECT 1 FROM comments c WHERE c.task_id=a.task_id AND c.author_key=a.author_key)''', (task_id,)).fetchone()[0]
             result['video_count'] = con.execute('SELECT COUNT(*) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0]
             if result['kind'] in ('likes', 'recommendations'):
                 result['unknown_authors'] = con.execute("SELECT COUNT(DISTINCT author_key) FROM liked_videos WHERE task_id=? AND author_douyin_id=''", (task_id,)).fetchone()[0]
@@ -81,8 +83,10 @@ class Database:
                         SUM(parent_id!='') AS reply_count FROM comments GROUP BY task_id
                 ) c ON c.task_id=t.id
                 LEFT JOIN (
-                    SELECT task_id,COUNT(*) AS unknown_authors FROM authors
-                    WHERE identity_state!='verified' OR douyin_id='' GROUP BY task_id
+                    SELECT task_id,COUNT(*) AS unknown_authors FROM authors a
+                    WHERE (identity_state!='verified' OR douyin_id='')
+                        AND EXISTS(SELECT 1 FROM comments c WHERE c.task_id=a.task_id AND c.author_key=a.author_key)
+                    GROUP BY task_id
                 ) a ON a.task_id=t.id
                 LEFT JOIN (
                     SELECT task_id,COUNT(*) AS video_count,
@@ -138,10 +142,12 @@ class Database:
 
     def save_page(self, task_id, thread_id, comments, next_cursor, done):
         thread_id = str(thread_id)
-        cols = ('comment_id','video_id','parent_id','text','created_at','ip_label','nickname','douyin_id','uid','sec_uid','author_key','identity_state','reply_count')
+        cols = ('comment_id','video_id','parent_id','text','created_at','ip_label','nickname','douyin_id','uid','sec_uid','author_key','identity_state','reply_count','text_source')
         with self.connection() as con:
+            # Read/merge/write and the cursor advance must observe one state.
+            con.execute('BEGIN IMMEDIATE')
             for item in comments:
-                c = dict(item)
+                c = self._merge_comment(con, task_id, item)
                 parent_id = str(c.get('parent_id') or '')
                 if not parent_id and (c.get('reply_count') or 0) > 0:
                     self._observe_replies(con, task_id, c['comment_id'], c['reply_count'])
@@ -150,10 +156,8 @@ class Database:
                                          (task_id, c['comment_id'])).fetchone()
                     if not exists:
                         self._observe_replies(con, task_id, parent_id, new_preview=True)
-                c.setdefault('author_key', c.get('uid') or c.get('sec_uid') or f"comment:{c['comment_id']}")
                 values = [c.get(k, 0 if k == 'reply_count' else None if k == 'created_at' else 'unknown' if k == 'identity_state' else '') for k in cols]
                 con.execute('INSERT INTO comments(task_id,' + ','.join(cols) + ') VALUES(' + ','.join('?' for _ in range(len(cols)+1)) + ') ON CONFLICT(task_id,comment_id) DO UPDATE SET ' + ','.join(f'{k}=excluded.{k}' for k in cols if k != 'comment_id'), (task_id, *values))
-                self._save_author(con, task_id, c['author_key'], **{k:c.get(k) or '' for k in ('uid','sec_uid','douyin_id','nickname','identity_state')})
             con.execute('INSERT INTO checkpoints(task_id,thread_id,cursor,done) VALUES(?,?,?,?) ON CONFLICT(task_id,thread_id) DO UPDATE SET cursor=excluded.cursor,done=excluded.done', (task_id, str(thread_id), str(next_cursor), bool(done)))
             if thread_id:
                 con.execute('''UPDATE checkpoints SET reply_count_seen=MAX(COALESCE(reply_count_seen,0),
@@ -162,6 +166,65 @@ class Database:
                         ELSE reply_rows_seen END WHERE task_id=? AND thread_id=?''',
                     (task_id, thread_id, bool(done), task_id, thread_id, task_id, thread_id))
             con.execute('UPDATE tasks SET updated_at=? WHERE id=?', (time.time(),task_id))
+
+    def _merge_comment(self, con, task_id, item):
+        old = con.execute('SELECT * FROM comments WHERE task_id=? AND comment_id=?',
+                          (task_id, item['comment_id'])).fetchone()
+        present = item.get('_present_fields', item.keys())
+        preview = item.get('_source') == 'preview'
+        c = dict(old) if old else {k: item.get(k, '') for k in ('comment_id', 'video_id', 'parent_id')}
+        if not old:
+            c.update(text='', created_at=None, ip_label='', nickname='', uid='', sec_uid='',
+                     douyin_id='', identity_state='unknown', reply_count=item.get('reply_count', 0), text_source='legacy')
+        if 'text' in present and isinstance(item.get('text'), str):
+            if not preview or (not c['text'] and c['text_source'] != 'full'):
+                c['text'] = item['text']
+                c['text_source'] = 'preview' if preview else 'full'
+        for key in ('created_at', 'ip_label', 'nickname', 'reply_count'):
+            if key in present and item.get(key) not in (None, ''):
+                if not preview or c.get(key) in (None, '', 0):
+                    c[key] = item[key]
+
+        # The comment ID fixes the author association. Missing user objects must
+        # not replace it; contradictory identifiers remain pending verification.
+        previous = None
+        if old:
+            previous = con.execute('SELECT * FROM authors WHERE task_id=? AND author_key=?',
+                                   (task_id, old['author_key'])).fetchone()
+        if previous:
+            c['identity_state'] = previous['identity_state']
+        identities = ('uid', 'sec_uid', 'douyin_id')
+        expected = {key: (previous[key] if previous else '') or c[key] for key in identities}
+        conflict = any(item.get(key) and key in present and expected[key] and expected[key] != item[key]
+                       for key in identities)
+        if conflict:
+            c['nickname'] = old['nickname'] or (previous['nickname'] if previous else '')
+        for key in identities:
+            if not conflict and key in present and item.get(key):
+                c[key] = item[key]
+        temporary = f"comment:{c['comment_id']}"
+        if old and (old['author_key'] != temporary or conflict):
+            c['author_key'] = old['author_key']
+        else:
+            c['author_key'] = (item.get('author_key') if not old else '') or c['uid'] or c['sec_uid'] or temporary
+        if conflict or item.get('identity_state') == 'conflict' or c['identity_state'] == 'conflict' or (previous and previous['identity_state'] == 'conflict'):
+            c['identity_state'] = 'conflict'
+        elif c['douyin_id']:
+            c['identity_state'] = 'verified'
+        if old and previous and c['author_key'] == old['author_key']:
+            # Do not feed stale raw comment fields back into a hydrated profile.
+            fields = {key: item[key] for key in (*identities, 'nickname')
+                      if key in present and item.get(key) and not conflict}
+        else:
+            # Carry known data across a temporary-key upgrade, without inferring
+            # identities from nicknames or unrelated orphaned authors.
+            fields = {key: c.get(key) or (previous[key] if previous else '')
+                      for key in (*identities, 'nickname')}
+        fields['identity_state'] = c['identity_state']
+        author = self._save_author(con, task_id, c['author_key'],
+            preserve_nickname=preview or 'nickname' not in present, **fields)
+        c['identity_state'] = author['identity_state']
+        return c
 
     @staticmethod
     def _observe_replies(con, task_id, thread_id, declared_count=0, *, new_preview=False):
@@ -178,13 +241,15 @@ class Database:
             con.execute('UPDATE tasks SET collection_complete=0 WHERE id=?', (task_id,))
 
     @staticmethod
-    def _save_author(con, task_id, author_key, *, profile_verified=False, **fields):
+    def _save_author(con, task_id, author_key, *, profile_verified=False, preserve_nickname=False, **fields):
         old = con.execute('SELECT * FROM authors WHERE task_id=? AND author_key=?', (task_id,author_key)).fetchone()
         merged = dict(old) if old else {k:'' for k in ('uid','sec_uid','douyin_id','nickname','identity_state')}
         conflict = bool(old and any(old[k] and fields.get(k) and old[k] != str(fields[k]) for k in ('uid','sec_uid','douyin_id')))
-        needs_verification = not profile_verified and (conflict or merged['identity_state'] == 'conflict')
+        needs_verification = not profile_verified and (conflict or merged['identity_state'] == 'conflict' or fields.get('identity_state') == 'conflict')
         for k,v in fields.items():
             if k in merged and v:
+                if k == 'nickname' and (preserve_nickname or needs_verification) and merged[k]:
+                    continue
                 if needs_verification and k in ('uid','sec_uid','douyin_id') and merged[k]:
                     continue
                 if k == 'identity_state' and merged[k] == 'verified' and v == 'unknown':
@@ -194,6 +259,7 @@ class Database:
             merged['identity_state'] = 'conflict'
         con.execute('INSERT OR REPLACE INTO authors(task_id,author_key,uid,sec_uid,douyin_id,nickname,identity_state) VALUES(?,?,?,?,?,?,?)',
                     (task_id, author_key, *(merged[k] for k in ('uid','sec_uid','douyin_id','nickname','identity_state'))))
+        return merged
 
     def save_author(self, task_id, author_key, **fields):
         with self.connection() as con:
@@ -202,7 +268,8 @@ class Database:
 
     def authors(self, task_id, unresolved_only=True):
         with self.connection() as con:
-            sql = 'SELECT * FROM authors WHERE task_id=?'
+            sql = '''SELECT * FROM authors a WHERE task_id=? AND EXISTS(
+                SELECT 1 FROM comments c WHERE c.task_id=a.task_id AND c.author_key=a.author_key)'''
             if unresolved_only:
                 sql += " AND (identity_state!='verified' OR douyin_id='')"
             return [dict(r) for r in con.execute(sql,(task_id,))]

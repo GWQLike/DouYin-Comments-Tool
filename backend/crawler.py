@@ -41,7 +41,7 @@ def _string(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def normalize_comment(raw: dict, video_id: str, parent_id: str = "") -> dict:
+def normalize_comment(raw: dict, video_id: str, parent_id: str = "", *, preview: bool = False) -> dict:
     """Do not confuse internal uid/legacy short_id with an asserted public Douyin ID."""
     comment_id = _string(raw.get("cid") or raw.get("comment_id"))
     if not comment_id:
@@ -69,6 +69,17 @@ def normalize_comment(raw: dict, video_id: str, parent_id: str = "") -> dict:
         reply_count = 1
     if raw.get("reply_comment"):
         reply_count = max(reply_count, 1)
+    present = {field for field, source in (
+        ('text', 'text'), ('created_at', 'create_time'), ('ip_label', 'ip_label'),
+        ('reply_count', 'reply_comment_total')) if source in raw}
+    present.update(field for field, source in (
+        ('uid', 'uid'), ('sec_uid', 'sec_uid'), ('nickname', 'nickname'),
+        ('douyin_id', 'unique_id')) if source in user)
+    if raw.get('reply_comment'):
+        present.add('reply_count')
+    # A null/non-text value is unavailable, not an explicit empty edit.
+    if not isinstance(raw.get('text'), str):
+        present.discard('text')
     return {
         "comment_id": comment_id,
         "video_id": _string(video_id),
@@ -83,6 +94,8 @@ def normalize_comment(raw: dict, video_id: str, parent_id: str = "") -> dict:
         "author_key": uid or sec_uid or f"comment:{comment_id}",
         "identity_state": "verified" if public_id else "unknown",
         "reply_count": reply_count,
+        "_present_fields": tuple(sorted(present)),
+        "_source": "preview" if preview else "full",
     }
 
 
@@ -279,7 +292,7 @@ class Collector:
                         raise PageFailure("平台内嵌回复格式异常，已保留断点。")
                     # Keep responses we already have, even if later reply pages
                     # fail. Preview rows never establish a reply-thread checkpoint.
-                    rows.extend(normalize_comment(reply, video_id, parent_id or normalized["comment_id"])
+                    rows.extend(normalize_comment(reply, video_id, parent_id or normalized["comment_id"], preview=True)
                                 for reply in previews)
                 return {"done": done, "rows": rows,
                         "next_cursor": int(next_cursor), "has_cursor": "cursor" in response}

@@ -119,15 +119,64 @@ def _reply_observations(con: sqlite3.Connection) -> None:
         WHERE thread_id!='' AND task_id IN (SELECT id FROM tasks WHERE kind='comments')''')
 
 
+def _comment_field_sources(con: sqlite3.Connection) -> None:
+    # Legacy content has no reliable source label; preserve it against previews
+    # until a full response explicitly supplies the text again.
+    con.execute("ALTER TABLE comments ADD COLUMN text_source TEXT NOT NULL DEFAULT 'legacy' CHECK(text_source IN ('legacy','preview','full'))")
+    reader = con.cursor()
+    reader.row_factory = sqlite3.Row
+    candidates = reader.execute("""SELECT c.* FROM comments c LEFT JOIN authors a
+        ON a.task_id=c.task_id AND a.author_key=c.author_key
+        WHERE c.author_key='comment:'||c.comment_id AND
+            (COALESCE(c.uid,'')!='' OR COALESCE(c.sec_uid,'')!=''
+                OR COALESCE(a.uid,'')!='' OR COALESCE(a.sec_uid,'')!='')""").fetchall()
+    identities = ('uid', 'sec_uid', 'douyin_id')
+    changed_tasks = set()
+    for comment in candidates:
+        task_id, old_key = comment['task_id'], comment['author_key']
+        old = reader.execute('SELECT * FROM authors WHERE task_id=? AND author_key=?', (task_id, old_key)).fetchone()
+        records = [comment] + ([old] if old else [])
+        fields = {key: next((record[key] for record in records if record[key]), '')
+                  for key in (*identities, 'nickname')}
+        key = fields['uid'] or fields['sec_uid']
+        target = reader.execute('SELECT * FROM authors WHERE task_id=? AND author_key=?', (task_id, key)).fetchone()
+        if target:
+            records.append(target)
+        if any(record['identity_state'] == 'conflict' for record in records) or any(
+            len({record[field] for record in records if record[field]}) > 1 for field in identities):
+            # Keep ambiguous links and their evidence for individual verification.
+            con.execute("UPDATE comments SET identity_state='conflict' WHERE task_id=? AND comment_id=?", (task_id, comment['comment_id']))
+            con.execute('''INSERT INTO authors(task_id,author_key,uid,sec_uid,douyin_id,nickname,identity_state)
+                VALUES(?,?,?,?,?,?,'conflict') ON CONFLICT(task_id,author_key) DO UPDATE SET identity_state='conflict' ''',
+                (task_id, old_key, *(fields[field] for field in (*identities, 'nickname'))))
+            changed_tasks.add(task_id)
+            continue
+        if target:
+            fields = {field: target[field] or fields[field] for field in fields}
+        state = 'verified' if fields['douyin_id'] else 'unknown'
+        con.execute('''INSERT INTO authors(task_id,author_key,uid,sec_uid,douyin_id,nickname,identity_state)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(task_id,author_key) DO UPDATE SET
+            uid=excluded.uid,sec_uid=excluded.sec_uid,douyin_id=excluded.douyin_id,
+            nickname=excluded.nickname,identity_state=excluded.identity_state''',
+            (task_id, key, *(fields[field] for field in (*identities, 'nickname')), state))
+        con.execute('UPDATE comments SET author_key=? WHERE task_id=? AND comment_id=?', (key, task_id, comment['comment_id']))
+        changed_tasks.add(task_id)
+    now = datetime.now(timezone.utc).timestamp()
+    con.executemany('UPDATE tasks SET updated_at=? WHERE id=?', ((now, task_id) for task_id in changed_tasks))
+    # Retain orphaned rows as history. Counts and verification queues only use
+    # authors referenced by current comments; lost fields are not reconstructed.
+
+
 # Append new versions; never rewrite an applied migration to upgrade existing data.
-MIGRATIONS = (Migration(1, _adopt_legacy_schema), Migration(2, _reply_observations))
+MIGRATIONS = (Migration(1, _adopt_legacy_schema), Migration(2, _reply_observations),
+              Migration(3, _comment_field_sources))
 
 _REQUIRED_COLUMNS = {
     'tasks': 'id source_url video_id title status created_at updated_at error stop_requested '
              'collection_complete verification_complete verify_authors kind target_account '
              'target_sec_uid target_nickname visibility max_videos start_time end_time list_order',
     'comments': 'task_id comment_id video_id parent_id text created_at ip_label nickname '
-                'douyin_id uid sec_uid author_key identity_state reply_count',
+                'douyin_id uid sec_uid author_key identity_state reply_count text_source',
     'authors': 'task_id author_key uid sec_uid douyin_id nickname identity_state',
     'checkpoints': 'task_id thread_id cursor done restarts reply_count_seen reply_rows_seen',
     'session': 'id status error',

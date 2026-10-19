@@ -44,7 +44,8 @@ def test_comment_page_consistent_snapshot_while_writer_commits(tmp_path, monkeyp
             def trace(sql):
                 if sql.startswith('SELECT COUNT(*) FROM ('):
                     with connection() as writer:
-                        writer.execute('INSERT INTO comments SELECT task_id,?,video_id,parent_id,text,created_at,ip_label,nickname,douyin_id,uid,sec_uid,author_key,identity_state,reply_count FROM comments WHERE comment_id=?', ('two', 'one'))
+                        writer.execute('''INSERT INTO comments(task_id,comment_id,video_id,parent_id,text,created_at,ip_label,nickname,douyin_id,uid,sec_uid,author_key,identity_state,reply_count)
+                            SELECT task_id,?,video_id,parent_id,text,created_at,ip_label,nickname,douyin_id,uid,sec_uid,author_key,identity_state,reply_count FROM comments WHERE comment_id=?''', ('two', 'one'))
             con.set_trace_callback(trace)
             yield con
     monkeypatch.setattr(db, 'connection', concurrent_connection)

@@ -36,7 +36,7 @@ class CommentPages:
                 continue
             if not isinstance(previews, list) or any(not isinstance(reply, dict) for reply in previews):
                 raise PageFailure('平台内嵌回复格式异常，已保留断点。')
-            rows.extend(normalize_comment(reply, self.video_id, self.parent_id or normalized['comment_id']) for reply in previews)
+            rows.extend(normalize_comment(reply, self.video_id, self.parent_id or normalized['comment_id'], preview=True) for reply in previews)
         return {'rows': rows, 'done': done, 'next_cursor': int(next_cursor), 'has_cursor': 'cursor' in response}
 
     def filter(self, rows, done):
