@@ -53,6 +53,12 @@ class CommentTask:
         self.db.update_task(self.task_id, verification_complete=not task['unknown_authors'],
             status='private' if task['visibility'] == 'private' else 'completed' if task['collection_complete'] else 'partial')
 
+    def fail_task(self, status, message=None, **fields):
+        if getattr(self, '_verifying', False):
+            message = self.db.get_task(self.task_id)['error'] or message
+            fields.pop('collection_complete', None)
+        self.db.update_task(self.task_id, status=status, error=message, **fields)
+
     def write(self, operation, *args, **kwargs):
         began = time.perf_counter()
         try:
@@ -111,7 +117,7 @@ class CommentTask:
                 error = ManualActionRequired("人工处理后接口仍未恢复，请稍后继续。")
             except RequestFailure as exc:
                 if not exc.retryable:
-                    raise RequestRejected(str(exc)) from None
+                    raise RequestRejected(str(exc), kind=exc.outcome.kind) from None
                 error = exc
             except Exception as exc:
                 # A structurally invalid successful HTTP response is still a
@@ -125,7 +131,7 @@ class CommentTask:
         if isinstance(error, RequestFailure):
             # Transport retry exhaustion must not become a new paginator retry.
             # Cursor/empty-page decisions remain the paginator's responsibility.
-            raise RequestRejected(str(error)) from None
+            raise RequestRejected(str(error), kind=error.outcome.kind) from None
         raise PageFailure(str(error)) from None
 
     async def parallel(self, items, operation) -> None:
@@ -177,59 +183,12 @@ class CommentTask:
             self.client._referer.reset(token)
 
     async def hydrate_authors(self) -> None:
-        self.db.update_task(self.task_id, status="verifying")
-        authors = self.db.authors(self.task_id, unresolved_only=False)
-        indexed: dict[tuple[str, str], dict[str, dict]] = {}
-
-        def index(author):
-            if author.get('identity_state') == 'verified' and author.get('douyin_id'):
-                for key in ('uid', 'sec_uid'):
-                    if author.get(key):
-                        indexed.setdefault((key, author[key]), {})[author['author_key']] = author
-
-        for author in authors:
-            index(author)
-
-        async def hydrate(author):
-            self.check_stop()
-            if author.get("identity_state") == "verified" and author.get("douyin_id") and author.get("nickname"):
-                return
-            # Rows sometimes omit uid but retain sec_uid. Resolve those aliases
-            # through an unambiguous already-verified author, without guessing.
-            aliases = {}
-            if author.get('identity_state') != 'conflict':
-                for key in ('uid', 'sec_uid'):
-                    aliases.update(indexed.get((key, author.get(key)), {}))
-            candidates = [fields for other in aliases.values() if other is not author and
-                          other.get("identity_state") == "verified" and other.get("douyin_id") and
-                          (fields := normalize_profile({"user": {**other, "unique_id": other["douyin_id"]}}, author))]
-            if len({candidate["douyin_id"] for candidate in candidates}) == 1:
-                fields = candidates[0]
-                self.write(self.db.save_author, self.task_id, author["author_key"], **fields)
-                author.update(fields)
-                index(author)
-                if author.get("nickname"):
-                    return
-            if not author.get("sec_uid"):
-                return
-            try:
-                response = await self.author_profile(author["sec_uid"])
-            except (PageFailure, RequestRejected):
-                return
-            fields = normalize_profile(response, author)
-            if fields is not None:
-                self.write(self.db.save_author, self.task_id, author["author_key"], **fields)
-                author.update(fields)
-                index(author)
-
-        started = time.perf_counter()
-        try:
-            await self.parallel(authors, hydrate)
-        finally:
-            self.metrics['author_seconds'] += time.perf_counter() - started
+        from backend.verification import hydrate
+        await hydrate(self)
 
     async def run(self, verify_only: bool = False) -> None:
         errors: list[str] = []
+        self._verifying = verify_only
         try:
             self.check_stop()
             task = self.db.get_task(self.task_id)
@@ -268,22 +227,22 @@ class CommentTask:
                 with self.phase('replies'):
                     await self.parallel(self.db.pending_threads(self.task_id), collect_reply)
                 complete = self.db.comments_complete(self.task_id)
-                self.db.update_task(self.task_id, collection_complete=bool(complete))
+                self.db.update_task(self.task_id, collection_complete=bool(complete), error=errors[0] if errors else None)
             if task['verify_authors']:
                 with self.phase('authors'):
                     await self.hydrate_authors()
-            verified = not self.db.authors(self.task_id, unresolved_only=True)
+            verified = not self.db.get_task(self.task_id)['unknown_authors']
             complete = bool(self.db.get_task(self.task_id).get("collection_complete"))
             self.db.update_task(self.task_id, verification_complete=verified,
                                 status="completed" if complete else "partial",
                                 error=errors[0] if errors else None)
         except StopRequested as exc:
-            self.db.update_task(self.task_id, status="paused", error=getattr(exc, "public_reason", None))
+            self.fail_task("paused", getattr(exc, "public_reason", None))
         except ManualActionRequired as exc:
-            self.db.update_task(self.task_id, status="waiting_login", error=str(exc))
+            self.fail_task("waiting_login", str(exc))
             self.db.session_set("waiting", str(exc))
         except (PageFailure, RequestRejected) as exc:
-            self.db.update_task(self.task_id, status="partial", error=str(exc))
+            self.fail_task("partial", str(exc))
 
 
 class LikesTask(CommentTask):
@@ -423,28 +382,11 @@ class LikesTask(CommentTask):
         await self.engine.collect_activity(lambda cursor: self.fetch_list_page(sec_uid, cursor), ActivityPages(self, visibility))
 
     async def hydrate_authors(self) -> None:
-        self.db.update_task(self.task_id, status="verifying")
-
-        async def hydrate(author):
-            self.check_stop()
-            if not author.get("sec_uid"):
-                return
-            try:
-                profile = await self.author_profile(author["sec_uid"])
-            except (PageFailure, RequestRejected):
-                return
-            verified = normalize_profile(profile, author)
-            if verified:
-                self.write(self.db.save_liked_author, self.task_id, author["author_key"],
-                                          verified["nickname"], verified["douyin_id"])
-
-        started = time.perf_counter()
-        try:
-            await self.parallel(self.db.liked_authors(self.task_id), hydrate)
-        finally:
-            self.metrics['author_seconds'] += time.perf_counter() - started
+        from backend.verification import hydrate
+        await hydrate(self)
 
     async def run(self, verify_only: bool = False) -> None:
+        self._verifying = verify_only
         try:
             self.check_stop()
             task = self.db.get_task(self.task_id)
@@ -471,7 +413,7 @@ class LikesTask(CommentTask):
                 if self.db.get_task(self.task_id)["status"] == "private":
                     return
                 complete = bool(self.db.get_checkpoint(self.task_id, self.list_kind)["done"])
-                self.db.update_task(self.task_id, collection_complete=complete)
+                self.db.update_task(self.task_id, collection_complete=complete, error=error)
             if task['verify_authors']:
                 with self.phase('authors'):
                     await self.hydrate_authors()
@@ -479,12 +421,12 @@ class LikesTask(CommentTask):
             self.db.update_task(self.task_id, status="completed" if complete else "partial", error=error,
                                 verification_complete=not self.db.liked_authors(self.task_id))
         except StopRequested as exc:
-            self.db.update_task(self.task_id, status="paused", error=getattr(exc, "public_reason", None))
+            self.fail_task("paused", getattr(exc, "public_reason", None))
         except ManualActionRequired as exc:
-            self.db.update_task(self.task_id, status="waiting_login", error=str(exc))
+            self.fail_task("waiting_login", str(exc))
             self.db.session_set("waiting", str(exc))
         except (PageFailure, RequestRejected) as exc:
-            self.db.update_task(self.task_id, status="partial", error=str(exc), collection_complete=False)
+            self.fail_task("partial", str(exc), collection_complete=False)
 
 
 class RecommendationsTask(LikesTask):

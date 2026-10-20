@@ -41,6 +41,9 @@ class VerificationRequired(ManualActionRequired):
 
 class RequestRejected(Exception):
     """A terminal operation error, outside the paginator's replayable errors."""
+    def __init__(self, message, *, kind=None):
+        super().__init__(message)
+        self.kind = kind
 
 
 class NetworkPause(ControlledStop):

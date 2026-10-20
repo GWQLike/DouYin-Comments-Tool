@@ -108,7 +108,7 @@ class StableRequestPolicy(RequestPolicy):
     def check_control(self):
         self.check_stop()
         if self.state.get('halted'):
-            raise ProtectionPause('短时间内再次触发限流或验证，任务已暂停；冷却 15 分钟后请手动继续。')
+            raise ProtectionPause('短时间内再次触发限流或验证，任务已暂停；冷却 15 分钟后请手动继续。', kind='protection')
 
     async def wait_ready(self):
         while self.paused:

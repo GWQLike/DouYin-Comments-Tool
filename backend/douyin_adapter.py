@@ -292,7 +292,7 @@ class DouyinAdapter:
         else:
             self.policy.pause()
         if challenge and self.stop_on_challenge:
-            raise ControlledStop('实测遇到首次人机验证，已立即停止并保留断点。')
+            raise ControlledStop('实测遇到首次人机验证，已立即停止并保留断点。', kind='verification')
         self._session_checked = self._cookies_checked = None
 
     async def ensure_session(self):

@@ -24,9 +24,10 @@ class StopRequested(Exception):
 
 class ControlledStop(StopRequested):
     """A locally authored control reason safe to show in the workbench."""
-    def __init__(self, reason):
+    def __init__(self, reason, *, kind=None):
         super().__init__()
         self.public_reason = reason
+        self.kind = kind
 
 
 class PageFailure(Exception):
@@ -107,6 +108,7 @@ def normalize_profile(profile: dict, author: dict) -> dict | None:
     if not isinstance(user, dict):
         return None
     uid, sec_uid = _string(user.get("uid")), _string(user.get("sec_uid"))
+    uid, sec_uid = ('' if value == '0' else value for value in (uid, sec_uid))
     for key, actual in (("uid", uid), ("sec_uid", sec_uid)):
         expected = _string(author.get(key))
         if expected and actual and expected != actual:
@@ -331,56 +333,8 @@ class Collector:
             stalls = 0
 
     async def hydrate_authors(self) -> None:
-        self.db.update_task(self.task_id, status="verifying")
-        authors = self.db.authors(self.task_id, unresolved_only=False)
-        indexed: dict[tuple[str, str], dict[str, dict]] = {}
-
-        def index(author):
-            if author.get('identity_state') == 'verified' and author.get('douyin_id'):
-                for key in ('uid', 'sec_uid'):
-                    if author.get(key):
-                        indexed.setdefault((key, author[key]), {})[author['author_key']] = author
-
-        for author in authors:
-            index(author)
-
-        async def hydrate(author):
-            self.check_stop()
-            if author.get("identity_state") == "verified" and author.get("douyin_id") and author.get("nickname"):
-                return
-            # Rows sometimes omit uid but retain sec_uid. Resolve those aliases
-            # through an unambiguous already-verified author, without guessing.
-            aliases = {}
-            if author.get('identity_state') != 'conflict':
-                for key in ('uid', 'sec_uid'):
-                    aliases.update(indexed.get((key, author.get(key)), {}))
-            candidates = [fields for other in aliases.values() if other is not author and
-                          other.get("identity_state") == "verified" and other.get("douyin_id") and
-                          (fields := normalize_profile({"user": {**other, "unique_id": other["douyin_id"]}}, author))]
-            if len({candidate["douyin_id"] for candidate in candidates}) == 1:
-                fields = candidates[0]
-                self.db.save_author(self.task_id, author["author_key"], **fields)
-                author.update(fields)
-                index(author)
-                if author.get("nickname"):
-                    return
-            if not author.get("sec_uid"):
-                return
-            try:
-                response = await self.author_profile(author["sec_uid"])
-            except PageFailure:
-                return
-            fields = normalize_profile(response, author)
-            if fields is not None:
-                self.db.save_author(self.task_id, author["author_key"], **fields)
-                author.update(fields)
-                index(author)
-
-        started = time.perf_counter()
-        try:
-            await self.parallel(authors, hydrate)
-        finally:
-            self.metrics['author_seconds'] += time.perf_counter() - started
+        from backend.verification import hydrate
+        await hydrate(self)
 
     async def run(self, verify_only: bool = False) -> None:
         errors: list[str] = []
@@ -422,7 +376,7 @@ class Collector:
                 )
                 self.db.update_task(self.task_id, collection_complete=bool(complete))
             await self.hydrate_authors()
-            verified = not self.db.authors(self.task_id, unresolved_only=True)
+            verified = not self.db.get_task(self.task_id)['unknown_authors']
             complete = bool(self.db.get_task(self.task_id).get("collection_complete"))
             self.db.update_task(self.task_id, verification_complete=verified,
                                 status="completed" if complete else "partial",
@@ -444,6 +398,7 @@ async def worker(args: argparse.Namespace) -> int:
 
     db = Database(str(Path(args.db).resolve()))
     stopped = False
+    verifying = args.verify_only
 
     def handle_stop(*_: Any) -> None:
         nonlocal stopped
@@ -456,13 +411,16 @@ async def worker(args: argparse.Namespace) -> int:
         return stopped or (db.should_stop(args.task) if args.task else db.session_get().get("status") == "logged_out")
 
     def waiting(wait: bool, message: str | None = None) -> None:
+        nonlocal verifying
         db.session_set("waiting" if wait else "ready", message)
         if args.task:
             current = db.get_task(args.task)
+            verifying = verifying or current['status'] == 'verifying'
             if wait:
-                db.update_task(args.task, status="waiting_login", error=message)
+                db.update_task(args.task, status="waiting_login", **({} if verifying else {'error': message}))
             elif current.get("status") == "waiting_login":
-                db.update_task(args.task, status="verifying" if args.verify_only else "running", error=None)
+                db.update_task(args.task, status="verifying" if verifying else "running",
+                               **({} if verifying else {'error': None}))
 
     try:
         db.session_set("waiting")
@@ -470,7 +428,9 @@ async def worker(args: argparse.Namespace) -> int:
         return 0
     except StopRequested as exc:
         if args.task:
-            db.update_task(args.task, status="paused", error=getattr(exc, "public_reason", None))
+            current = db.get_task(args.task)
+            previous_error = current['error'] if verifying or current['status'] == 'verifying' else None
+            db.update_task(args.task, status="paused", error=previous_error or getattr(exc, "public_reason", None))
         else:
             db.session_set("logged_out")
         return 0
@@ -481,7 +441,9 @@ async def worker(args: argparse.Namespace) -> int:
             message = str(exc)
         db.session_set("error", message)
         if args.task:
-            db.update_task(args.task, status="partial", error=message)
+            current = db.get_task(args.task)
+            previous_error = current['error'] if verifying or current['status'] == 'verifying' else None
+            db.update_task(args.task, status="partial", error=previous_error or message)
         return 1
 
 

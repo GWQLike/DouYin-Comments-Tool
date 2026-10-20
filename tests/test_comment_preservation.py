@@ -133,7 +133,8 @@ def test_temporary_upgrade_into_conflicting_existing_author_remains_unverified(s
     other = comment('reply')
     other['user']['sec_uid'] = 'conflicting-sec'
     save(db, tid, other)
-    assert db.get_task(tid)['unknown_authors'] == 1
+    # One shared author key contains two distinct identities; both need checking.
+    assert db.get_task(tid)['unknown_authors'] == 2
     assert len(db.authors(tid, False)) == 1
     assert {row['resolved_state'] for row in db.read_comments(tid)} == {'conflict'}
 
@@ -261,7 +262,7 @@ def test_version_three_repairs_only_proven_links_preserves_missing_fields_and_re
     db = Database(path)
     backup, = backups(path)
     assert snapshot(backup) == before
-    assert snapshot(path)[0] == 3
+    assert snapshot(path)[0] == migrations.MIGRATIONS[-1].version
     rows = {row['comment_id']: row for row in db.read_comments('comments')}
     assert rows['c1']['author_key'] == 'fixture.uid'
     assert rows['c1']['text_source'] == 'legacy'

@@ -54,15 +54,15 @@ class Database:
             result = dict(row)
             counts = con.execute("SELECT SUM(parent_id='') AS main_count,SUM(parent_id!='') AS reply_count FROM comments WHERE task_id=?", (task_id,)).fetchone()
             result.update({k: counts[k] or 0 for k in ('main_count', 'reply_count')})
-            result['unknown_authors'] = con.execute('''SELECT COUNT(*) FROM authors a WHERE task_id=?
-                AND (identity_state!='verified' OR douyin_id='')
-                AND EXISTS(SELECT 1 FROM comments c WHERE c.task_id=a.task_id AND c.author_key=a.author_key)''', (task_id,)).fetchone()[0]
+            result['unknown_authors'] = con.execute('''SELECT COUNT(*) FROM (
+                SELECT DISTINCT author_key,source_uid,source_sec_uid FROM author_verifications v
+                WHERE task_id=? AND status!='confirmed' AND
+                (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
+                 OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id)))''', (task_id,)).fetchone()[0]
             result['video_count'] = con.execute('SELECT COUNT(*) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0]
-            if result['kind'] in ('likes', 'recommendations'):
-                result['unknown_authors'] = con.execute("SELECT COUNT(DISTINCT author_key) FROM liked_videos WHERE task_id=? AND author_douyin_id=''", (task_id,)).fetchone()[0]
             result['collection_complete'] = bool(result['collection_complete'])
             result['verify_authors'] = bool(result['verify_authors'])
-            result['verification_complete'] = bool(result['collection_complete'] and result['unknown_authors'] == 0)
+            result['verification_complete'] = result['unknown_authors'] == 0
             result.pop('stop_requested', None)
             return result
 
@@ -74,24 +74,21 @@ class Database:
                 COALESCE(c.main_count,0) AS main_count,
                 COALESCE(c.reply_count,0) AS reply_count,
                 COALESCE(v.video_count,0) AS video_count,
-                CASE WHEN t.kind IN ('likes','recommendations')
-                    THEN COALESCE(v.unknown_authors,0)
-                    ELSE COALESCE(a.unknown_authors,0) END AS unknown_authors
+                COALESCE(a.unknown_authors,0) AS unknown_authors
                 FROM tasks t
                 LEFT JOIN (
                     SELECT task_id,SUM(parent_id='') AS main_count,
                         SUM(parent_id!='') AS reply_count FROM comments GROUP BY task_id
                 ) c ON c.task_id=t.id
                 LEFT JOIN (
-                    SELECT task_id,COUNT(*) AS unknown_authors FROM authors a
-                    WHERE (identity_state!='verified' OR douyin_id='')
-                        AND EXISTS(SELECT 1 FROM comments c WHERE c.task_id=a.task_id AND c.author_key=a.author_key)
-                    GROUP BY task_id
+                    SELECT task_id,COUNT(*) AS unknown_authors FROM (
+                        SELECT DISTINCT task_id,author_key,source_uid,source_sec_uid
+                        FROM author_verifications v WHERE status!='confirmed' AND
+                        (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
+                         OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id))) GROUP BY task_id
                 ) a ON a.task_id=t.id
                 LEFT JOIN (
-                    SELECT task_id,COUNT(*) AS video_count,
-                        COUNT(DISTINCT CASE WHEN author_douyin_id='' THEN author_key END) AS unknown_authors
-                    FROM liked_videos GROUP BY task_id
+                    SELECT task_id,COUNT(*) AS video_count FROM liked_videos GROUP BY task_id
                 ) v ON v.task_id=t.id
                 ORDER BY t.created_at DESC''').fetchall()
         results = []
@@ -99,7 +96,7 @@ class Database:
             task = dict(row)
             task['collection_complete'] = bool(task['collection_complete'])
             task['verify_authors'] = bool(task['verify_authors'])
-            task['verification_complete'] = bool(task['collection_complete'] and task['unknown_authors'] == 0)
+            task['verification_complete'] = task['unknown_authors'] == 0
             task.pop('stop_requested', None)
             results.append(task)
         return results
@@ -158,6 +155,9 @@ class Database:
                         self._observe_replies(con, task_id, parent_id, new_preview=True)
                 values = [c.get(k, 0 if k == 'reply_count' else None if k == 'created_at' else 'unknown' if k == 'identity_state' else '') for k in cols]
                 con.execute('INSERT INTO comments(task_id,' + ','.join(cols) + ') VALUES(' + ','.join('?' for _ in range(len(cols)+1)) + ') ON CONFLICT(task_id,comment_id) DO UPDATE SET ' + ','.join(f'{k}=excluded.{k}' for k in cols if k != 'comment_id'), (task_id, *values))
+                from .verification import sync_record
+                sync_record(con, task_id, c['comment_id'], c['author_key'], c['uid'], c['sec_uid'],
+                            c['douyin_id'], c['nickname'], c['identity_state'] == 'conflict')
             con.execute('INSERT INTO checkpoints(task_id,thread_id,cursor,done) VALUES(?,?,?,?) ON CONFLICT(task_id,thread_id) DO UPDATE SET cursor=excluded.cursor,done=excluded.done', (task_id, str(thread_id), str(next_cursor), bool(done)))
             if thread_id:
                 con.execute('''UPDATE checkpoints SET reply_count_seen=MAX(COALESCE(reply_count_seen,0),
@@ -257,6 +257,9 @@ class Database:
                 merged[k] = str(v)
         if needs_verification:
             merged['identity_state'] = 'conflict'
+            if not old or old['identity_state'] != 'conflict':
+                con.execute('''UPDATE author_verifications SET source_conflict=1,status='conflict',
+                    failure_kind='identity_conflict' WHERE task_id=? AND author_key=?''', (task_id, author_key))
         con.execute('INSERT OR REPLACE INTO authors(task_id,author_key,uid,sec_uid,douyin_id,nickname,identity_state) VALUES(?,?,?,?,?,?,?)',
                     (task_id, author_key, *(merged[k] for k in ('uid','sec_uid','douyin_id','nickname','identity_state'))))
         return merged
@@ -265,6 +268,7 @@ class Database:
         with self.connection() as con:
             self._save_author(con, task_id, author_key, profile_verified=fields.get('identity_state') == 'verified', **fields)
             con.execute('UPDATE tasks SET updated_at=? WHERE id=?', (time.time(),task_id))
+        self._save_legacy_author_result(task_id, author_key, fields)
 
     def authors(self, task_id, unresolved_only=True):
         with self.connection() as con:
@@ -294,10 +298,13 @@ class Database:
                         AND COALESCE(p.done,0)=0)''', (task_id, task_id)).fetchone()[0])
 
     COMMENT_SELECT = '''SELECT c.*,
-        COALESCE(NULLIF(a.douyin_id,''),c.douyin_id) AS public_number,
-        COALESCE(NULLIF(c.nickname,''),a.nickname,'') AS display_name,
-        COALESCE(a.identity_state,c.identity_state) AS resolved_state
-        FROM comments c LEFT JOIN authors a ON c.task_id=a.task_id AND c.author_key=a.author_key'''
+        COALESCE(v.douyin_id,NULLIF(a.douyin_id,''),c.douyin_id) AS public_number,
+        COALESCE(NULLIF(c.nickname,''),NULLIF(v.nickname,''),a.nickname,'') AS display_name,
+        CASE WHEN v.status='confirmed' THEN 'verified' WHEN v.status='conflict' THEN 'conflict'
+            WHEN v.status IS NOT NULL THEN 'unknown'
+            ELSE COALESCE(a.identity_state,c.identity_state) END AS resolved_state
+        FROM comments c LEFT JOIN authors a ON c.task_id=a.task_id AND c.author_key=a.author_key
+        LEFT JOIN author_verifications v ON v.task_id=c.task_id AND v.record_id=c.comment_id'''
 
     def read_comment_page(self, task_id, filters, *, limit, offset=0):
         from .search import format_comment, match_text
@@ -338,12 +345,8 @@ class Database:
     def read_comments(self, task_id):
         # A single SQL read yields a consistent export/search snapshot, including hydrated identity.
         with self.connection() as con:
-            return [dict(r) for r in con.execute('''SELECT c.*,
-                COALESCE(NULLIF(a.douyin_id,''),c.douyin_id) AS public_number,
-                COALESCE(NULLIF(c.nickname,''),a.nickname,'') AS display_name,
-                COALESCE(a.identity_state,c.identity_state) AS resolved_state
-                FROM comments c LEFT JOIN authors a ON c.task_id=a.task_id AND c.author_key=a.author_key
-                WHERE c.task_id=? ORDER BY c.created_at IS NULL,c.created_at DESC,c.comment_id DESC''', (task_id,))]
+            return [dict(r) for r in con.execute(self.COMMENT_SELECT +
+                ' WHERE c.task_id=? ORDER BY c.created_at IS NULL,c.created_at DESC,c.comment_id DESC', (task_id,))]
 
     def session_get(self):
         with self.connection() as con:
@@ -365,12 +368,27 @@ class Database:
             else:
                 updates.append(f'{key}=excluded.{key}')
         with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
             next_order = con.execute('SELECT COALESCE(MAX(collected_order),0) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0] + 1
+            affected = {}
             for video in videos:
                 values = [video.get(k, None if k in ('created_at', 'action_at') else '') for k in cols]
                 con.execute('INSERT INTO liked_videos(task_id,' + ','.join(cols) + ') VALUES(' + ','.join('?' for _ in range(len(cols)+1)) + ') ON CONFLICT(task_id,video_id) DO UPDATE SET ' + ','.join(updates), (task_id, *values))
                 con.execute('UPDATE liked_videos SET collected_order=? WHERE task_id=? AND video_id=? AND collected_order IS NULL', (next_order, task_id, video['video_id']))
                 next_order += 1
+                affected.setdefault(video['author_key'], set()).add(video['video_id'])
+            from .verification import sync_record
+            for author_key, ids in affected.items():
+                counts = con.execute('''SELECT COUNT(DISTINCT NULLIF(uid,'')),COUNT(DISTINCT NULLIF(sec_uid,''))
+                    FROM liked_videos WHERE task_id=? AND author_key=?''', (task_id, author_key)).fetchone()
+                conflict = any(count > 1 for count in counts)
+                if conflict:
+                    con.execute('''UPDATE author_verifications SET source_conflict=1,status='conflict',failure_kind='identity_conflict'
+                        WHERE task_id=? AND author_key=? AND source_conflict=0''', (task_id, author_key))
+                for video_id in ids:
+                    row = con.execute('SELECT * FROM liked_videos WHERE task_id=? AND video_id=?', (task_id, video_id)).fetchone()
+                    sync_record(con, task_id, row['video_id'], row['author_key'], row['uid'], row['sec_uid'],
+                                row['author_douyin_id'], row['author_name'], conflict)
             con.execute("INSERT INTO checkpoints(task_id,thread_id,cursor,done) VALUES(?,?,?,?) ON CONFLICT(task_id,thread_id) DO UPDATE SET cursor=excluded.cursor,done=excluded.done", (task_id, checkpoint_key, str(next_cursor), bool(done)))
             con.execute('UPDATE tasks SET updated_at=? WHERE id=?', (time.time(), task_id))
 
@@ -401,7 +419,10 @@ class Database:
             raise ValueError('Invalid video page offset')
         task = con.execute('SELECT list_order FROM tasks WHERE id=?', (task_id,)).fetchone()
         order = 'collected_order IS NULL,collected_order ASC,created_at DESC,video_id DESC' if task and task['list_order'] == 'activity' else 'created_at IS NULL,created_at DESC,video_id DESC'
-        sql = 'SELECT * FROM liked_videos WHERE task_id=? ORDER BY ' + order
+        sql = '''SELECT liked_videos.*,v.status AS verification_state,v.douyin_id AS verified_number,
+            v.nickname AS verified_name FROM liked_videos LEFT JOIN author_verifications v
+            ON v.task_id=liked_videos.task_id AND v.record_id=liked_videos.video_id
+            WHERE liked_videos.task_id=? ORDER BY ''' + order
         params = (task_id,)
         if limit is not None or offset:
             sql += ' LIMIT ? OFFSET ?'
@@ -410,12 +431,16 @@ class Database:
             params += (min(limit, 2**63 - 1) if limit is not None else -1, min(offset, 2**63 - 1))
         rows = [dict(r) for r in con.execute(sql, params)]
         for row in rows:
+            state, number, name = (row.pop(key) for key in ('verification_state', 'verified_number', 'verified_name'))
+            if state is not None:
+                row['author_douyin_id'] = number if state == 'confirmed' else ''
+                row['author_name'] = row['author_name'] or name or ''
             row['time_text'] = time_text(row['created_at'])
         return rows
 
     def liked_authors(self, task_id):
-        with self.connection() as con:
-            return [dict(r) for r in con.execute("SELECT author_key,MAX(uid) AS uid,MAX(sec_uid) AS sec_uid FROM liked_videos WHERE task_id=? AND author_douyin_id='' GROUP BY author_key", (task_id,))]
+        return [{**r, 'uid': r['source_uid'], 'sec_uid': r['source_sec_uid']}
+                for r in self.verification_records(task_id) if r['status'] != 'confirmed']
 
     def cached_account_profiles(self, account):
         # Previously verified public profiles are discovery hints only. The
@@ -424,9 +449,70 @@ class Database:
             return [dict(r) for r in con.execute("""SELECT DISTINCT uid,sec_uid FROM authors
                 WHERE identity_state='verified' AND sec_uid!='' AND douyin_id=? COLLATE NOCASE
                 UNION SELECT DISTINCT uid,sec_uid FROM liked_videos
-                WHERE sec_uid!='' AND author_douyin_id=? COLLATE NOCASE""", (account, account))]
+                WHERE sec_uid!='' AND author_douyin_id=? COLLATE NOCASE
+                UNION SELECT DISTINCT uid,sec_uid FROM author_verifications v
+                WHERE status='confirmed' AND sec_uid!='' AND douyin_id=? COLLATE NOCASE AND
+                (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
+                 OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id))""",
+                (account, account, account))]
 
     def save_liked_author(self, task_id, author_key, author_name='', author_douyin_id=''):
+        self._save_legacy_author_result(task_id, author_key, {'nickname': author_name, 'douyin_id': author_douyin_id})
+
+    def _save_legacy_author_result(self, task_id, author_key, fields):
+        # Compatibility for local callers: no representative ID may be invented
+        # for a group containing different identities.
+        from .verification import profile_result
+        records = [r for r in self.verification_records(task_id) if r['author_key'] == author_key]
+        if not records:
+            return
+        identities = {(r['source_uid'], r['source_sec_uid']) for r in records}
+        if not fields.get('uid') and not fields.get('sec_uid'):
+            if len(identities) != 1:
+                raise ValueError('Author group does not have one unambiguous identity')
+            uid, sec_uid = next(iter(identities))
+            fields = {**fields, 'uid': uid, 'sec_uid': sec_uid}
+        response = {'user': {**fields, 'unique_id': fields.get('douyin_id', '')}}
+        for record in records:
+            expected = {**record, 'uid': record['source_uid'], 'sec_uid': record['source_sec_uid']}
+            status, reason, verified = profile_result(response, expected)
+            self.finish_verification(task_id, record, status, reason, verified)
+
+    def verification_records(self, task_id):
         with self.connection() as con:
-            con.execute("UPDATE liked_videos SET author_name=COALESCE(NULLIF(author_name,''),?),author_douyin_id=? WHERE task_id=? AND author_key=?", (author_name, author_douyin_id, task_id, author_key))
-            con.execute('UPDATE tasks SET updated_at=? WHERE id=?', (time.time(), task_id))
+            return [dict(r) for r in con.execute('''SELECT * FROM author_verifications v WHERE task_id=? AND
+                (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
+                 OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id))
+                ORDER BY record_id''', (task_id,))]
+
+    @staticmethod
+    def _verification_where(task_id, record):
+        return (task_id, record['record_id'], record['author_key'], record['source_uid'], record['source_sec_uid'],
+                record['source_number'], record['source_conflict'])
+
+    VERIFICATION_WHERE = ''' WHERE task_id=? AND record_id=? AND author_key=? AND source_uid=?
+        AND source_sec_uid=? AND source_number=? AND source_conflict=?'''
+
+    def begin_verification(self, task_id, record):
+        self.begin_verifications(task_id, [record])
+
+    def begin_verifications(self, task_id, records):
+        now = time.time()
+        with self.connection() as con:
+            con.executemany('UPDATE author_verifications SET attempts=attempts+1,last_attempt_at=?' + self.VERIFICATION_WHERE,
+                            ((now, *self._verification_where(task_id, record)) for record in records))
+
+    def finish_verification(self, task_id, record, status, failure_kind='', fields=None):
+        self.finish_verifications(task_id, [(record, status, failure_kind, fields)])
+
+    def finish_verifications(self, task_id, results):
+        with self.connection() as con:
+            changed = 0
+            for record, status, failure_kind, fields in results:
+                updates = {'status': status, 'failure_kind': failure_kind}
+                if fields:
+                    updates.update({key: fields[key] for key in ('uid', 'sec_uid', 'douyin_id', 'nickname')})
+                changed += con.execute('UPDATE author_verifications SET ' + ','.join(f'{key}=?' for key in updates)
+                    + self.VERIFICATION_WHERE, (*updates.values(), *self._verification_where(task_id, record))).rowcount
+            if changed:
+                con.execute('UPDATE tasks SET updated_at=? WHERE id=?', (time.time(), task_id))

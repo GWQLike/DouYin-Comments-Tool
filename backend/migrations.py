@@ -167,9 +167,45 @@ def _comment_field_sources(con: sqlite3.Connection) -> None:
     # authors referenced by current comments; lost fields are not reconstructed.
 
 
+def _author_verification_records(con: sqlite3.Connection) -> None:
+    con.execute('''CREATE TABLE author_verifications (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, record_id TEXT NOT NULL,
+        author_key TEXT NOT NULL, source_uid TEXT NOT NULL DEFAULT '', source_sec_uid TEXT NOT NULL DEFAULT '',
+        source_number TEXT NOT NULL DEFAULT '', source_conflict INTEGER NOT NULL DEFAULT 0,
+        uid TEXT NOT NULL DEFAULT '', sec_uid TEXT NOT NULL DEFAULT '', douyin_id TEXT NOT NULL DEFAULT '',
+        nickname TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'pending'
+            CHECK(status IN ('pending','confirmed','no_query','not_provided','request_failed','conflict')),
+        failure_kind TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+        last_attempt_at REAL, PRIMARY KEY(task_id,record_id))''')
+    # Keep raw comment/video fields intact. A legacy shared author may only
+    # supply a result when its IDs agree with this particular comment.
+    con.execute('''INSERT INTO author_verifications(task_id,record_id,author_key,source_uid,source_sec_uid,
+        source_number,source_conflict,uid,sec_uid,douyin_id,nickname,status,failure_kind)
+        SELECT c.task_id,c.comment_id,c.author_key,COALESCE(c.uid,''),
+            COALESCE(c.sec_uid,''),COALESCE(c.douyin_id,''),
+            CASE WHEN c.identity_state='conflict' OR a.identity_state='conflict' THEN 1 ELSE 0 END,
+            COALESCE(NULLIF(c.uid,''),a.uid,''),COALESCE(NULLIF(c.sec_uid,''),a.sec_uid,''),
+            COALESCE(NULLIF(a.douyin_id,''),c.douyin_id,''),COALESCE(NULLIF(c.nickname,''),a.nickname,''),
+            CASE WHEN c.identity_state='conflict' OR a.identity_state='conflict' THEN 'conflict'
+                WHEN COALESCE(NULLIF(a.douyin_id,''),c.douyin_id,'')!='' THEN 'confirmed' ELSE 'pending' END,
+            CASE WHEN c.identity_state='conflict' OR a.identity_state='conflict' THEN 'identity_conflict' ELSE '' END
+        FROM comments c LEFT JOIN authors a ON a.task_id=c.task_id AND a.author_key=c.author_key
+            AND NOT (COALESCE(c.uid,'')!='' AND COALESCE(a.uid,'')!='' AND c.uid!=a.uid)
+            AND NOT (COALESCE(c.sec_uid,'')!='' AND COALESCE(a.sec_uid,'')!='' AND c.sec_uid!=a.sec_uid)''')
+    con.execute('''INSERT INTO author_verifications(task_id,record_id,author_key,source_uid,source_sec_uid,
+        source_number,uid,sec_uid,douyin_id,nickname,status)
+        SELECT task_id,video_id,author_key,COALESCE(uid,''),COALESCE(sec_uid,''),COALESCE(author_douyin_id,''),
+            COALESCE(uid,''),COALESCE(sec_uid,''),COALESCE(author_douyin_id,''),COALESCE(author_name,''),
+            CASE WHEN COALESCE(author_douyin_id,'')!='' THEN 'confirmed' ELSE 'pending' END FROM liked_videos''')
+    con.execute('''UPDATE author_verifications AS v SET source_conflict=1,status='conflict',failure_kind='identity_conflict'
+        WHERE EXISTS(SELECT 1 FROM liked_videos other WHERE other.task_id=v.task_id AND other.author_key=v.author_key
+            AND ((other.uid!='' AND v.source_uid!='' AND other.uid!=v.source_uid)
+                OR (other.sec_uid!='' AND v.source_sec_uid!='' AND other.sec_uid!=v.source_sec_uid)))''')
+
+
 # Append new versions; never rewrite an applied migration to upgrade existing data.
 MIGRATIONS = (Migration(1, _adopt_legacy_schema), Migration(2, _reply_observations),
-              Migration(3, _comment_field_sources))
+              Migration(3, _comment_field_sources), Migration(4, _author_verification_records))
 
 _REQUIRED_COLUMNS = {
     'tasks': 'id source_url video_id title status created_at updated_at error stop_requested '
@@ -182,11 +218,14 @@ _REQUIRED_COLUMNS = {
     'session': 'id status error',
     'liked_videos': 'task_id video_id title author_name author_douyin_id created_at video_url '
                     'author_key uid sec_uid action_at collected_order',
+    'author_verifications': 'task_id record_id author_key source_uid source_sec_uid source_number source_conflict '
+                           'uid sec_uid douyin_id nickname status failure_kind attempts last_attempt_at',
 }
 _PRIMARY_KEYS = {
     'tasks': ['id'], 'comments': ['task_id', 'comment_id'],
     'authors': ['task_id', 'author_key'], 'checkpoints': ['task_id', 'thread_id'],
     'session': ['id'], 'liked_videos': ['task_id', 'video_id'],
+    'author_verifications': ['task_id', 'record_id'],
 }
 
 

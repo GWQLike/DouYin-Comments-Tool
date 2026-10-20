@@ -270,26 +270,8 @@ class LikesCollector(Collector):
             visited.add(str(cursor))
 
     async def hydrate_authors(self) -> None:
-        self.db.update_task(self.task_id, status="verifying")
-
-        async def hydrate(author):
-            self.check_stop()
-            if not author.get("sec_uid"):
-                return
-            try:
-                profile = await self.author_profile(author["sec_uid"])
-            except PageFailure:
-                return
-            verified = normalize_profile(profile, author)
-            if verified:
-                self.db.save_liked_author(self.task_id, author["author_key"],
-                                          verified["nickname"], verified["douyin_id"])
-
-        started = time.perf_counter()
-        try:
-            await self.parallel(self.db.liked_authors(self.task_id), hydrate)
-        finally:
-            self.metrics['author_seconds'] += time.perf_counter() - started
+        from backend.verification import hydrate
+        await hydrate(self)
 
     async def run(self, verify_only: bool = False) -> None:
         try:

@@ -65,6 +65,9 @@ async def test_optional_then_verify_only_matches_full_export_without_recollectin
     for enabled in (True, False):
         task = create(db, kind, verify_authors=enabled)
         fixture = Fixture(kind)
+        if kind != 'comments':
+            # Keep the missing author distinct from the already identified one.
+            fixture.pages[100]['aweme_list'][1]['author'].update(uid='other_uid', sec_uid='other_sec')
         args = args_for(tmp_path / str(enabled), task)
         runtime = WorkbenchRuntime(db, args, lambda: False, lambda *args: None,
             transport_factory=lambda *args: SimulatedTransport(*args, fixture=fixture))

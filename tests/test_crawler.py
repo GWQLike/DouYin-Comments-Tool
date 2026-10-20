@@ -213,7 +213,7 @@ async def test_unknown_profile_never_becomes_verified_or_uses_internal_uid(task_
     assert task["collection_complete"] and not task["verification_complete"]
     assert task["unknown_authors"] == 1
     row = db.read_comments(tid)[0]
-    assert row["public_number"] == "" and row["resolved_state"] == "unknown"
+    assert row["public_number"] == "" and row["resolved_state"] == "conflict"
 
 
 @pytest.mark.asyncio

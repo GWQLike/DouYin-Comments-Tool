@@ -39,7 +39,7 @@ class WorkerManager:
                 if self.task_id:
                     task = self.db.get_task(self.task_id)
                     if task['status'] in ACTIVE:
-                        self.db.update_task(self.task_id, status='partial', error='采集进程已退出，已保留结果，可继续采集')
+                        self.db.update_task(self.task_id, status='partial', error=task['error'] or '采集进程已退出，已保留结果，可继续采集')
                 elif self.db.session_get()['status'] == 'waiting':
                     self.db.session_set('error', '登录窗口已退出，请重新打开')
                 if self.log:
@@ -63,7 +63,8 @@ class WorkerManager:
                 from .crawler import PageFailure
                 raise HTTPException(503, str(exc) if isinstance(exc, PageFailure) else '专用 Chrome 未能启动') from None
             if task_id:
-                self.db.update_task(task_id, stop_requested=False, error=None, status='verifying' if verify else 'running')
+                self.db.update_task(task_id, stop_requested=False, status='verifying' if verify else 'running',
+                                    **({} if verify else {'error': None}))
             else:
                 self.db.session_set('waiting')
             command = [sys.executable, '-m', 'backend.crawler', '--db', self.db.path, '--profile', str(self.data_dir / 'chrome-profile')]
@@ -86,7 +87,8 @@ class WorkerManager:
                 self.log.close()
                 self.log = None
                 if task_id:
-                    self.db.update_task(task_id, status='failed', error='采集进程无法启动，请检查项目环境')
+                    previous_error = self.db.get_task(task_id)['error'] if verify else None
+                    self.db.update_task(task_id, status='failed', error=previous_error or '采集进程无法启动，请检查项目环境')
                 else:
                     self.db.session_set('error', '登录进程无法启动，请检查项目环境')
                 raise HTTPException(500, '采集进程无法启动，请重新初始化环境') from None
