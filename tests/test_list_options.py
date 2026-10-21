@@ -31,14 +31,15 @@ def client(tmp_path):
 
 @pytest.mark.parametrize('kind', ['likes', 'recommendations'])
 def test_options_round_trip_and_refresh_preserve_bounds(client, kind):
+    bounds = {'start': '2026-10-05', 'end': '2026-10-06'} if kind == 'recommendations' else {}
     response = client.post(f'/api/{kind}/tasks', json={
-        'account': 'target.user', 'max_videos': 10, 'start': '2026-10-05', 'end': '2026-10-06',
+        'account': 'target.user', 'max_videos': 10, **bounds,
     })
     assert response.status_code == 200
     task = response.json()
     cst = timezone(timedelta(hours=8))
-    assert task['start_time'] == datetime(2026, 10, 5, tzinfo=cst).timestamp()
-    assert task['end_time'] == datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=cst).timestamp()
+    assert task['start_time'] == (datetime(2026, 10, 5, tzinfo=cst).timestamp() if bounds else None)
+    assert task['end_time'] == (datetime(2026, 10, 6, 23, 59, 59, 999999, tzinfo=cst).timestamp() if bounds else None)
     assert task['max_videos'] == 10 and task['list_order'] == 'activity'
     refreshed = client.post(f"/api/tasks/{task['id']}/refresh").json()
     assert refreshed['id'] != task['id']
@@ -60,11 +61,12 @@ def test_invalid_options_do_not_create_task(client, kind, options):
 
 @pytest.mark.parametrize('kind', ['likes', 'recommendations'])
 def test_default_unlimited_and_iso_bound(client, kind):
+    bounds = {'start': '2026-10-06T14:23:08+08:00'} if kind == 'recommendations' else {}
     task = client.post(f'/api/{kind}/tasks', json={
-        'account': 'target.user', 'start': '2026-10-06T14:23:08+08:00',
+        'account': 'target.user', **bounds,
     }).json()
     assert task['max_videos'] == 0 and task['end_time'] is None
-    assert task['start_time'] == 1791267788 and task['list_order'] == 'activity'
+    assert task['start_time'] == (1791267788 if bounds else None) and task['list_order'] == 'activity'
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,39 @@ import pytest
 from backend.db import Database
 
 
+def test_cli_rejects_unsupported_likes_range_before_adapter_creation(tmp_path):
+    code = """
+import runpy
+import sys
+import types
+
+db_path, profile_path, task_id = sys.argv[1:]
+class ForbiddenAdapter:
+    def __init__(self, *args):
+        print('unexpected transport creation')
+        raise AssertionError('preflight must run first')
+adapter = types.ModuleType('backend.douyin_adapter')
+adapter.DouyinAdapter = ForbiddenAdapter
+sys.modules[adapter.__name__] = adapter
+sys.argv = ['backend.crawler', '--db', db_path, '--profile', profile_path, '--task', task_id]
+runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+"""
+    db_path = tmp_path / 'worker.sqlite3'
+    db = Database(db_path)
+    task = db.create_task('', kind='likes', target_account='test.account', start_time=0)
+    db.save_likes_page(task['id'], [], 100, False)
+    checkpoint = db.get_checkpoint(task['id'], 'likes')
+    result = subprocess.run(
+        [sys.executable, '-c', code, str(db_path), str(tmp_path / 'profile'), task['id']],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, encoding='utf-8',
+        timeout=15, env={**os.environ, 'PYTHONUTF8': '1'},
+    )
+    assert result.returncode == 1, result.stderr
+    assert 'unexpected transport creation' not in result.stdout + result.stderr
+    assert '点赞时间' in db.get_task(task['id'])['error']
+    assert db.get_checkpoint(task['id'], 'likes') == checkpoint
+
+
 @pytest.mark.parametrize("exception,status,exit_code", [
     ("StopRequested", "logged_out", 0),
     ("PageFailure", "error", 1),

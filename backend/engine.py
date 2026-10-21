@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from backend.upstream import ENGINE_VERSION, module
+from backend.preflight import check_task_conditions
 
 
 class WorkbenchRuntime:
@@ -53,6 +54,8 @@ class WorkbenchRuntime:
 
 
 async def run_engine(db, args, stop, waiting, *, runtime=None):
+    if args.task:
+        check_task_conditions(db.get_task(args.task), verify_only=args.verify_only)
     runtime = runtime or WorkbenchRuntime(db, args, stop, waiting)
     engine = module('media_platform.douyin.core').DouYinCrawler(runtime=runtime)
     try:

@@ -16,11 +16,19 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .db import Database
+from .preflight import PreflightRejected, check_task_conditions
 from .search import Filters, export_txt, export_likes_txt, select_comments, date_bound
 from .urls import parse_input
 
 ROOT = Path(__file__).resolve().parent.parent
 ACTIVE = {'waiting_login', 'running', 'verifying'}
+
+
+def check_collection_conditions(task, *, verify_only=False):
+    try:
+        check_task_conditions(task, verify_only=verify_only)
+    except PreflightRejected as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 class WorkerManager:
@@ -52,6 +60,8 @@ class WorkerManager:
         with self.lock:
             if self.check():
                 raise HTTPException(409, '已有采集或登录窗口正在运行，请先停止当前操作')
+            if task_id:
+                check_collection_conditions(self.db.get_task(task_id), verify_only=verify)
             from .stable_policy import StableRequestPolicy
             control = StableRequestPolicy.public_state(self.data_dir / 'collection-control.json')
             import time
@@ -233,6 +243,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
                 raise ValueError('开始时间不能晚于结束时间')
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+        check_collection_conditions({'kind': kind, 'start_time': start_time, 'end_time': end_time})
         return db.create_task('', kind=kind, target_account=account, max_videos=body.max_videos,
                               start_time=start_time, end_time=end_time, list_order='activity', verify_authors=body.verify_authors)
 
@@ -251,7 +262,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
     @app.post('/api/tasks/{task_id}/start')
     def start_task(task_id: str):
         with manager.lock:
-            task_or_404(task_id)
+            check_collection_conditions(task_or_404(task_id))
             manager.start(task_id)
             return db.get_task(task_id)
 
@@ -277,6 +288,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
     @app.post('/api/tasks/{task_id}/refresh')
     def refresh(task_id: str):
         old = task_or_404(task_id)
+        check_collection_conditions(old)
         return db.create_task(old['source_url'], old['video_id'], kind=old['kind'], target_account=old['target_account'],
                               max_videos=old['max_videos'], start_time=old['start_time'], end_time=old['end_time'], list_order=old['list_order'], verify_authors=old['verify_authors'])
 

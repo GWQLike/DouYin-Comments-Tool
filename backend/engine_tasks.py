@@ -117,7 +117,8 @@ class CommentTask:
                 error = ManualActionRequired("人工处理后接口仍未恢复，请稍后继续。")
             except RequestFailure as exc:
                 if not exc.retryable:
-                    raise RequestRejected(str(exc), kind=exc.outcome.kind) from None
+                    raise RequestRejected(str(exc), kind=exc.outcome.kind,
+                                          resource_missing=exc.outcome.resource_missing) from None
                 error = exc
             except Exception as exc:
                 # A structurally invalid successful HTTP response is still a
@@ -131,7 +132,8 @@ class CommentTask:
         if isinstance(error, RequestFailure):
             # Transport retry exhaustion must not become a new paginator retry.
             # Cursor/empty-page decisions remain the paginator's responsibility.
-            raise RequestRejected(str(error), kind=error.outcome.kind) from None
+            raise RequestRejected(str(error), kind=error.outcome.kind,
+                                  resource_missing=error.outcome.resource_missing) from None
         raise PageFailure(str(error)) from None
 
     async def parallel(self, items, operation) -> None:
@@ -318,7 +320,14 @@ class LikesTask(CommentTask):
         sec_uid = _string(candidate.get("sec_uid"))
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", sec_uid):
             return None
-        profile = await self.request(lambda: self.client.get_user_info(sec_uid))
+        try:
+            profile = await self.request(lambda: self.client.get_user_info(sec_uid))
+        except RequestRejected as exc:
+            # Only an explicit missing profile invalidates this discovery clue.
+            # Login, challenge, throttling and transport failures must still stop.
+            if exc.resource_missing:
+                return None
+            raise
         verified = normalize_profile(profile, candidate)
         if not verified or account_key(verified["douyin_id"]) != account_key(account):
             return None
@@ -333,7 +342,7 @@ class LikesTask(CommentTask):
                 return verified
             # Never mix the prior account's saved videos with a newly reassigned
             # public number during resume. A fresh batch can resolve it again.
-            raise PageFailure("该主页当前抖音号与任务不一致，已停止；请核对抖音号后新建任务。")
+            raise PageFailure("原目标主页已失效或当前抖音号与任务不一致，已停止；请核对抖音号后新建任务。")
         cached = {}
         for candidate in self.db.cached_account_profiles(account):
             verified = await self.verify_target(account, candidate)

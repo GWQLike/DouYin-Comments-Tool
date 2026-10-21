@@ -21,6 +21,7 @@ class Outcome:
     kind: Kind
     reason: str = ''
     retry_after: str | None = None
+    resource_missing: bool = False
 
 
 class RequestFailure(PageFailure):
@@ -41,9 +42,10 @@ class VerificationRequired(ManualActionRequired):
 
 class RequestRejected(Exception):
     """A terminal operation error, outside the paginator's replayable errors."""
-    def __init__(self, message, *, kind=None):
+    def __init__(self, message, *, kind=None, resource_missing=False):
         super().__init__(message)
         self.kind = kind
+        self.resource_missing = resource_missing
 
 
 class NetworkPause(ControlledStop):
@@ -132,7 +134,8 @@ def classify_http(status, data, *, category=None, raw=False, retry_after=None):
             return business
         return Outcome(Kind.PERMANENT, '平台拒绝访问（HTTP 403），原因尚未明确；已停止本次操作并保留断点。')
     if status >= 400:
-        return Outcome(Kind.PERMANENT, f'平台请求未成功（HTTP {status}），已停止本次操作并保留断点。')
+        return Outcome(Kind.PERMANENT, f'平台请求未成功（HTTP {status}），已停止本次操作并保留断点。',
+                       resource_missing=category == 'author_profile' and status in (404, 410))
     if raw:
         return Outcome(Kind.SUCCESS)
     business = classify_payload(data, category=category)
