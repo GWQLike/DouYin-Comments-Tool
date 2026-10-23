@@ -248,6 +248,7 @@ async def test_worker_login_during_verification_preserves_collection_error(tmp_p
 @pytest.mark.parametrize('launch_fails', [False, True])
 def test_manager_keeps_collection_error_on_verification_start_and_exit(tmp_path, monkeypatch, launch_fails):
     from backend.app import WorkerManager
+    from backend.runtime_control import ProcessLease
     from fastapi import HTTPException
     db, tid = seed(tmp_path, 'comments', [{'uid': 'u', 'sec_uid': 's'}])
     manager = WorkerManager(db, tmp_path)
@@ -256,14 +257,18 @@ def test_manager_keeps_collection_error_on_verification_start_and_exit(tmp_path,
     process.poll.return_value = None
     monkeypatch.setattr('backend.app.subprocess.Popen',
         Mock(side_effect=OSError('fixture spawn failure')) if launch_fails else Mock(return_value=process))
-    if launch_fails:
-        with pytest.raises(HTTPException):
+    with ProcessLease(tmp_path, 'service') as owner:
+        owner.identify()
+        manager.owner = owner
+        if launch_fails:
+            with pytest.raises(HTTPException) as error:
+                manager.start(tid, verify=True)
+            assert error.value.status_code == 500
+        else:
             manager.start(tid, verify=True)
-    else:
-        manager.start(tid, verify=True)
-        assert db.get_task(tid)['error'] == '保留的采集错误'
-        process.poll.return_value = 1
-        assert not manager.check()
+            assert db.get_task(tid)['error'] == '保留的采集错误'
+            process.poll.return_value = 1
+            assert not manager.check()
     assert db.get_task(tid)['error'] == '保留的采集错误'
     assert db.get_checkpoint(tid)['cursor'] == 40
 

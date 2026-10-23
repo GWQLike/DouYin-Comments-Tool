@@ -19,6 +19,7 @@ from .db import Database, TaskNotFound
 from .preflight import PreflightRejected, check_task_conditions
 from .search import Filters, export_txt, export_likes_txt, date_bound
 from .task_state import ACTIVE
+from .runtime_control import ProcessLease, OwnershipError, owner_alive, POLL_SECONDS
 from .urls import parse_input
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,12 +51,37 @@ class WorkerManager:
         self.task_id = None
         self.lock = threading.RLock()
         self.log = None
+        self.owner = None
+        self._monitor_stop = threading.Event()
+        self._monitor = None
         from .browser_session import DedicatedBrowser
         self.browser = DedicatedBrowser(self.data_dir)
+
+    def start_monitor(self, owner):
+        self.owner = owner
+        self._monitor_stop.clear()
+        def monitor():
+            while not self._monitor_stop.wait(POLL_SECONDS):
+                try:
+                    self.check()
+                except Exception:
+                    # Retry the local observation; never start a replacement
+                    # worker or rewrite a task after an observation failure.
+                    continue
+        self._monitor = threading.Thread(target=monitor, name='worker-monitor', daemon=True)
+        self._monitor.start()
+
+    def stop_monitor(self):
+        self._monitor_stop.set()
+        if self._monitor:
+            self._monitor.join(timeout=2)
+            self._monitor = None
 
     def check(self):
         with self.lock:
             if self.process is not None and self.process.poll() is not None:
+                if getattr(self.process, 'stdin', None):
+                    self.process.stdin.close()
                 if self.task_id:
                     self.db.transition_task(self.task_id, 'worker_exit', message='采集进程已退出，已保留结果，可继续采集')
                 elif self.db.session_get()['status'] == 'waiting':
@@ -64,6 +90,9 @@ class WorkerManager:
                     self.log.close()
                     self.log = None
                 self.process, self.task_id = None, None
+            if self.browser.launcher and not self.browser.is_alive():
+                if self.db.session_get()['status'] != 'logged_out':
+                    self.db.session_set('logged_out', '专用浏览器已关闭，请重新打开登录窗口。')
             return self.process is not None
 
     def start(self, task_id=None, verify=False, *, validation=None):
@@ -77,6 +106,13 @@ class WorkerManager:
             import time
             if task_id and (control['control_status'] == 'error' or (control['control_status'] == 'paused' and control.get('cooldown_until', 0) > time.time())):
                 raise HTTPException(409, control['control_reason'] or '采集正在冷却，请稍后手动继续')
+            if self.owner is None or not owner_alive(self.data_dir, self.owner.token):
+                raise HTTPException(503, '服务未取得数据目录所有权，请重新启动工具。')
+            try:
+                with ProcessLease(self.data_dir, 'worker'):
+                    pass
+            except OwnershipError as exc:
+                raise HTTPException(409, str(exc)) from None
             try:
                 endpoint = self.browser.ensure()
             except Exception as exc:
@@ -87,6 +123,7 @@ class WorkerManager:
             else:
                 self.db.session_set('waiting')
             command = [sys.executable, '-m', 'backend.crawler', '--db', self.db.path, '--profile', str(self.data_dir / 'chrome-profile')]
+            command += ['--service-token', self.owner.token, '--stop-pipe']
             if task_id:
                 command += ['--task', task_id]
             if verify:
@@ -99,7 +136,7 @@ class WorkerManager:
             env.setdefault('PLAYWRIGHT_BROWSERS_PATH', str(ROOT / 'data' / 'playwright-browsers'))
             self.log = open(self.data_dir / 'worker.log', 'a', encoding='utf-8')
             try:
-                self.process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=self.log, stderr=self.log,
+                self.process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=self.log, stderr=self.log,
                                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                 self.task_id = task_id
             except Exception:
@@ -119,6 +156,10 @@ class WorkerManager:
                     self.db.transition_task(self.task_id, 'request_stop')
                 else:
                     self.db.session_set('logged_out')
+                if getattr(self.process, 'stdin', None):
+                    # A separate stop channel cannot be overwritten by a late
+                    # login-success callback updating the session row.
+                    self.process.stdin.close()
                 try:
                     self.process.wait(timeout=4)
                 except subprocess.TimeoutExpired:
@@ -142,6 +183,7 @@ class WorkerManager:
 
     def close_browser(self):
         self.browser.close()
+        self.db.session_set('logged_out')
 
 
 class NewTask(BaseModel):
@@ -171,19 +213,38 @@ def query_filters(account: str = Query('', max_length=128), keyword: str = Query
 
 def create_app(data_dir=None, manager_factory=WorkerManager):
     data_dir = Path(data_dir or os.environ.get('DOUYIN_DATA_DIR', ROOT / 'data')).resolve()
-    db = Database(data_dir / 'comments.sqlite3')
-    manager = manager_factory(db, data_dir)
+    db = manager = None
 
     @asynccontextmanager
     async def lifespan(app):
-        db.recover_interrupted()
-        yield
-        manager.stop()
-        if hasattr(manager, 'close_browser'):
-            manager.close_browser()
+        nonlocal db, manager
+        with ProcessLease(data_dir, 'service') as owner:
+            owner.identify()
+            # Old workers must release their OS lock before migrations or
+            # recovery write to this database, regardless of saved task status.
+            worker_guard = ProcessLease(data_dir, 'worker').acquire(timeout=4)
+            try:
+                db = Database(data_dir / 'comments.sqlite3')
+                db.recover_interrupted()
+                db.session_set('logged_out')
+                manager = manager_factory(db, data_dir)
+                app.state.db, app.state.manager = db, manager
+            finally:
+                worker_guard.release()
+            try:
+                if hasattr(manager, 'start_monitor'):
+                    manager.start_monitor(owner)
+                yield
+            finally:
+                if hasattr(manager, 'stop_monitor'):
+                    manager.stop_monitor()
+                try:
+                    manager.stop()
+                finally:
+                    if hasattr(manager, 'close_browser'):
+                        manager.close_browser()
 
     app = FastAPI(title='抖音评论检索工作台', lifespan=lifespan)
-    app.state.db, app.state.manager = db, manager
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
 
     @app.middleware('http')

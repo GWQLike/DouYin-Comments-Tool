@@ -391,24 +391,49 @@ class Collector:
 
 
 async def worker(args: argparse.Namespace) -> int:
+    from contextlib import ExitStack
+    from backend.runtime_control import ProcessLease, OwnershipError, owner_alive
+    directory = Path(args.db).resolve().parent
+    owner_token = getattr(args, 'service_token', None)
+    try:
+        with ExitStack() as leases:
+            if owner_token:
+                if not owner_alive(directory, owner_token):
+                    raise OwnershipError('所属服务已退出，未启动采集。')
+            else:
+                # Standalone CLI runs must not compete with a running service.
+                leases.enter_context(ProcessLease(directory, 'service'))
+            leases.enter_context(ProcessLease(directory, 'worker'))
+            if owner_token and not owner_alive(directory, owner_token):
+                raise OwnershipError('所属服务已退出，未启动采集。')
+            return await _worker_owned(args, (lambda: owner_alive(directory, owner_token)) if owner_token else None)
+    except OwnershipError as exc:
+        print(str(exc), flush=True)
+        return 1
+
+
+async def _worker_owned(args: argparse.Namespace, owner_check) -> int:
     worker_started = time.perf_counter()
     # Imports stay outside import-time pure normalization / collection tests.
     from backend.db import Database
     from backend.engine import run_engine
 
     db = Database(str(Path(args.db).resolve()))
-    stopped = False
+    from backend.runtime_control import StopSignal, POLL_SECONDS
+    stop = StopSignal(lambda: db.should_stop(args.task) if args.task else
+                      db.session_get().get('status') == 'logged_out', owner=owner_check)
+    if getattr(args, 'stop_pipe', False):
+        import threading
+        def watch_pipe():
+            try:
+                sys.stdin.buffer.read(1)
+            finally:
+                stop.request()
+        threading.Thread(target=watch_pipe, name='service-stop', daemon=True).start()
     verifying = args.verify_only
 
-    def handle_stop(*_: Any) -> None:
-        nonlocal stopped
-        stopped = True
-
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, handle_stop)
-
-    def should_stop() -> bool:
-        return stopped or (db.should_stop(args.task) if args.task else db.session_get().get("status") == "logged_out")
+        signal.signal(sig, stop.request)
 
     def waiting(wait: bool, message: str | None = None) -> None:
         nonlocal verifying
@@ -423,7 +448,17 @@ async def worker(args: argparse.Namespace) -> int:
 
     try:
         db.session_set("waiting")
-        await run_engine(db, args, should_stop, waiting)
+        pending = asyncio.create_task(run_engine(db, args, stop, waiting))
+        try:
+            while not pending.done():
+                if stop():
+                    raise StopRequested()
+                await asyncio.wait({pending}, timeout=POLL_SECONDS)
+            await pending
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
         return 0
     except StopRequested as exc:
         if args.task:
@@ -440,6 +475,9 @@ async def worker(args: argparse.Namespace) -> int:
         if args.task:
             db.transition_task(args.task, 'worker_failed', message=message)
         return 1
+    finally:
+        if stop.parent_lost or (owner_check is not None and not owner_check()):
+            db.session_set('logged_out', '所属服务已退出，采集已停止并保留断点。')
 
 
 def main() -> int:
@@ -451,6 +489,8 @@ def main() -> int:
     parser.add_argument("--max-requests", type=int, default=0)
     parser.add_argument("--max-seconds", type=float, default=0)
     parser.add_argument("--stop-on-challenge", action="store_true")
+    parser.add_argument("--service-token")
+    parser.add_argument("--stop-pipe", action="store_true")
     return asyncio.run(worker(parser.parse_args()))
 
 

@@ -141,6 +141,8 @@ class DouyinAdapter:
         self._manual_task = None
         self._session_generation = 0
         self._http_active = 0
+        self._closing = self._browser_lost = False
+        self.session_closed = lambda: None
         self.metrics = {"http_requests": 0, "http_seconds": 0.0, "signature_seconds": 0.0,
                         "session_checks": 0, "session_seconds": 0.0,
                         "cookie_refreshes": 0, "cookie_seconds": 0.0,
@@ -156,8 +158,16 @@ class DouyinAdapter:
             raise NetworkPause()
         if self.deadline and time.monotonic() >= self.deadline:
             raise ControlledStop('已达到实测时间上限，断点已保存。')
-        if self.page is not None and self.page.is_closed():
+        if self._browser_lost or (self.page is not None and self.page.is_closed()):
+            self.browser_closed()
             raise PageFailure("专用浏览器已关闭，已保存采集进度，可稍后继续。")
+
+    def browser_closed(self, *_):
+        if not self._closing and not self._browser_lost:
+            self._browser_lost = True
+            self._logged_in = False
+            self._session_checked = self._cookies_checked = None
+            self.session_closed()
 
     async def sleep(self, seconds: float):
         remaining = seconds
@@ -204,6 +214,8 @@ class DouyinAdapter:
             self.page = next((page for page in self.context.pages if urlsplit(page.url).hostname in ('www.douyin.com', 'douyin.com')), None)
             if self.page is None:
                 self.page = next((page for page in self.context.pages if page.url == 'about:blank'), None) or await self.context.new_page()
+            self.page.on('close', self.browser_closed)
+            self.context.on('close', self.browser_closed)
             self.page.set_default_timeout(5000)
             try:
                 if urlsplit(self.page.url).hostname not in ("www.douyin.com", "douyin.com"):
@@ -236,6 +248,7 @@ class DouyinAdapter:
             raise
 
     async def __aexit__(self, *_):
+        self._closing = True
         if self._manual_task and not self._manual_task.done():
             self._manual_task.cancel()
             await asyncio.gather(self._manual_task, return_exceptions=True)

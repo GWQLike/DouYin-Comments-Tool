@@ -11,6 +11,7 @@ from backend.likes import account_key, public_number, profile_visibility
 
 import re
 from backend.recommendations import recommendation_time
+from backend.runtime_control import StopSignal
 
 class CommentTask:
     def __init__(self, db: Any, client: Any, task_id: str, *,
@@ -19,7 +20,8 @@ class CommentTask:
                  stop: Callable[[], bool] | None = None):
         self.db, self.client, self.task_id = db, client, task_id
         self.interval = interval
-        self.stop = stop or (lambda: False)
+        self.stop = stop if isinstance(stop, StopSignal) else StopSignal(
+            lambda: (stop is not None and stop()) or self.db.should_stop(self.task_id))
         self.concurrency = max(1, min(3, concurrency))
         self._profile_requests: dict[str, asyncio.Task] = {}
         self.metrics = {'author_seconds': 0.0, 'profile_queries': 0, 'profile_reuses': 0,
@@ -64,7 +66,7 @@ class CommentTask:
             self.metrics['database_write_seconds'] += time.perf_counter() - began
 
     def check_stop(self) -> None:
-        if self.stop() or self.db.should_stop(self.task_id):
+        if self.stop():
             raise StopRequested()
 
     async def delay(self) -> None:

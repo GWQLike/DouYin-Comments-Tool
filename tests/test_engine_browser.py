@@ -37,6 +37,7 @@ def test_browser_owner_reuses_until_explicit_close(tmp_path, monkeypatch):
     launcher_type = module('tools.browser_launcher').BrowserLauncher
     launcher = Mock()
     launcher.browser_process.poll.return_value = None
+    launcher.cleanup.side_effect = lambda: setattr(launcher.browser_process.poll, 'return_value', 0)
     monkeypatch.setattr(module('tools.browser_launcher'), 'BrowserLauncher', lambda: launcher)
     monkeypatch.setattr(DedicatedBrowser, 'chrome_path', staticmethod(lambda: tmp_path / 'chrome.exe'))
     connection = Mock(__enter__=Mock(), __exit__=Mock())
@@ -67,9 +68,9 @@ def test_api_control_is_additive_and_start_blocked_during_cooldown(tmp_path):
     with pytest.raises(ProtectionPause):
         p.failure(rate_limited=True)
     app = create_app(tmp_path)
-    app.state.manager.browser.ensure = Mock(side_effect=AssertionError('browser should not start'))
-    task = app.state.db.create_task('https://www.douyin.com/video/123', '123')
     with TestClient(app) as client:
+        app.state.manager.browser.ensure = Mock(side_effect=AssertionError('browser should not start'))
+        task = app.state.db.create_task('https://www.douyin.com/video/123', '123')
         session = client.get('/api/session').json()
         assert session['control_status'] == 'paused' and session['cooldown_until'] > 0
         assert 'status' in session and 'error' in session

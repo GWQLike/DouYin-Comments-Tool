@@ -21,6 +21,8 @@ class WorkbenchRuntime:
 
     def open_transport(self):
         self.transport = self.transport_factory(Path(self.args.profile).resolve(), self.stop, self.waiting)
+        self.transport.session_closed = lambda: self.db.session_set(
+            'logged_out', '专用浏览器已关闭，请重新打开登录窗口。')
         self.transport.max_requests = getattr(self.args, 'max_requests', 0)
         seconds = getattr(self.args, 'max_seconds', 0)
         self.transport.deadline = time.monotonic() + seconds if seconds else None

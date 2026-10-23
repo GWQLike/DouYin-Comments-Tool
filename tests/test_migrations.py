@@ -210,6 +210,7 @@ def test_interrupted_migration_rolls_back_before_propagating_interrupt(tmp_path,
 
 def test_migration_failure_prevents_service_manager_startup(tmp_path, monkeypatch):
     from backend.app import create_app
+    from fastapi.testclient import TestClient
 
     path = tmp_path / 'comments.sqlite3'
     legacy_database(path)
@@ -220,7 +221,8 @@ def test_migration_failure_prevents_service_manager_startup(tmp_path, monkeypatc
 
     monkeypatch.setattr(migrations, 'MIGRATIONS', migrations.MIGRATIONS + (Migration(CURRENT_VERSION + 1, fail),))
     with pytest.raises(DatabaseMigrationError):
-        create_app(tmp_path, manager_factory=lambda *args: calls.append(args))
+        with TestClient(create_app(tmp_path, manager_factory=lambda *args: calls.append(args))):
+            pytest.fail('Migration must finish before serving requests')
     assert calls == []
     assert snapshot(path)[0] == 0
 
