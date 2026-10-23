@@ -417,10 +417,9 @@ async def worker(args: argparse.Namespace) -> int:
             current = db.get_task(args.task)
             verifying = verifying or current['status'] == 'verifying'
             if wait:
-                db.update_task(args.task, status="waiting_login", **({} if verifying else {'error': message}))
-            elif current.get("status") == "waiting_login":
-                db.update_task(args.task, status="verifying" if verifying else "running",
-                               **({} if verifying else {'error': None}))
+                db.transition_task(args.task, 'waiting', message=message, verify_only=verifying)
+            else:
+                db.transition_task(args.task, 'resume', verify_only=verifying)
 
     try:
         db.session_set("waiting")
@@ -428,9 +427,7 @@ async def worker(args: argparse.Namespace) -> int:
         return 0
     except StopRequested as exc:
         if args.task:
-            current = db.get_task(args.task)
-            previous_error = current['error'] if verifying or current['status'] == 'verifying' else None
-            db.update_task(args.task, status="paused", error=previous_error or getattr(exc, "public_reason", None))
+            db.transition_task(args.task, 'worker_pause', message=getattr(exc, 'public_reason', None))
         else:
             db.session_set("logged_out")
         return 0
@@ -441,9 +438,7 @@ async def worker(args: argparse.Namespace) -> int:
             message = str(exc)
         db.session_set("error", message)
         if args.task:
-            current = db.get_task(args.task)
-            previous_error = current['error'] if verifying or current['status'] == 'verifying' else None
-            db.update_task(args.task, status="partial", error=previous_error or message)
+            db.transition_task(args.task, 'worker_failed', message=message)
         return 1
 
 

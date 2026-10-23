@@ -98,18 +98,20 @@ def test_video_count_and_page_share_snapshot_during_collector_commit(tmp_path, m
     assert db.liked_video_ids(task_id) == {'1', '2'}
 
 
-def test_video_api_uses_page_count_instead_of_earlier_task_count(tmp_path, monkeypatch):
+def test_video_api_opens_snapshot_after_last_committed_page(tmp_path, monkeypatch):
     with TestClient(create_app(tmp_path, manager_factory=FakeManager)) as client:
         db = client.app.state.db
         task_id = client.post('/api/likes/tasks', json={'account': 'target.demo'}).json()['id']
         db.save_likes_page(task_id, [video('1')], 1, False)
-        original_page = db.read_liked_video_page
+        original_snapshot = db.task_snapshot
 
-        def commit_before_page(task_id, **options):
+        @contextmanager
+        def commit_before_snapshot(task_id):
             db.save_likes_page(task_id, [video('2')], 2, False)
-            return original_page(task_id, **options)
+            with original_snapshot(task_id) as snapshot:
+                yield snapshot
 
-        monkeypatch.setattr(db, 'read_liked_video_page', commit_before_page)
+        monkeypatch.setattr(db, 'task_snapshot', commit_before_snapshot)
         result = client.get(f'/api/tasks/{task_id}/videos').json()
         assert result['total'] == len(result['items']) == 2
         assert [item['video_id'] for item in result['items']] == ['1', '2']

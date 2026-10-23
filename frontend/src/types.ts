@@ -47,6 +47,8 @@ export interface VideoPage {
   page_size: number;
   collection_complete: boolean;
   visibility: ListVisibility;
+  unknown_authors?: number;
+  verification_complete?: boolean;
 }
 
 export interface VideoListDraft {

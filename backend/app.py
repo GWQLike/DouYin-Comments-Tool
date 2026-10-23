@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 import os
 from pathlib import Path
 import subprocess
@@ -15,13 +15,25 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from .db import Database
+from .db import Database, TaskNotFound
 from .preflight import PreflightRejected, check_task_conditions
-from .search import Filters, export_txt, export_likes_txt, select_comments, date_bound
+from .search import Filters, export_txt, export_likes_txt, date_bound
+from .task_state import ACTIVE
 from .urls import parse_input
 
 ROOT = Path(__file__).resolve().parent.parent
-ACTIVE = {'waiting_login', 'running', 'verifying'}
+
+
+def allowed_origin(origin):
+    if any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in origin):
+        return False
+    try:
+        parsed = urlparse(origin)
+        return (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost')
+                and parsed.port in (8765, 5173) and parsed.username is None and parsed.password is None
+                and not parsed.path and not parsed.params and not parsed.query and not parsed.fragment)
+    except ValueError:
+        return False
 
 
 def check_collection_conditions(task, *, verify_only=False):
@@ -45,9 +57,7 @@ class WorkerManager:
         with self.lock:
             if self.process is not None and self.process.poll() is not None:
                 if self.task_id:
-                    task = self.db.get_task(self.task_id)
-                    if task['status'] in ACTIVE:
-                        self.db.update_task(self.task_id, status='partial', error=task['error'] or '采集进程已退出，已保留结果，可继续采集')
+                    self.db.transition_task(self.task_id, 'worker_exit', message='采集进程已退出，已保留结果，可继续采集')
                 elif self.db.session_get()['status'] == 'waiting':
                     self.db.session_set('error', '登录窗口已退出，请重新打开')
                 if self.log:
@@ -73,8 +83,7 @@ class WorkerManager:
                 from .crawler import PageFailure
                 raise HTTPException(503, str(exc) if isinstance(exc, PageFailure) else '专用 Chrome 未能启动') from None
             if task_id:
-                self.db.update_task(task_id, stop_requested=False, status='verifying' if verify else 'running',
-                                    **({} if verify else {'error': None}))
+                self.db.transition_task(task_id, 'start', verify_only=verify, stop_requested=False)
             else:
                 self.db.session_set('waiting')
             command = [sys.executable, '-m', 'backend.crawler', '--db', self.db.path, '--profile', str(self.data_dir / 'chrome-profile')]
@@ -97,8 +106,8 @@ class WorkerManager:
                 self.log.close()
                 self.log = None
                 if task_id:
-                    previous_error = self.db.get_task(task_id)['error'] if verify else None
-                    self.db.update_task(task_id, status='failed', error=previous_error or '采集进程无法启动，请检查项目环境')
+                    self.db.transition_task(task_id, 'launch_failed', verify_only=verify,
+                                            message='采集进程无法启动，请检查项目环境')
                 else:
                     self.db.session_set('error', '登录进程无法启动，请检查项目环境')
                 raise HTTPException(500, '采集进程无法启动，请重新初始化环境') from None
@@ -107,7 +116,7 @@ class WorkerManager:
         with self.lock:
             if self.check():
                 if self.task_id:
-                    self.db.update_task(self.task_id, stop_requested=True)
+                    self.db.transition_task(self.task_id, 'request_stop')
                 else:
                     self.db.session_set('logged_out')
                 try:
@@ -126,7 +135,9 @@ class WorkerManager:
                         self.process.kill()
                         self.process.wait(timeout=3)
                 if self.task_id:
-                    self.db.update_task(self.task_id, status='paused')
+                    # The worker may have completed, found a private list or
+                    # recorded a protection pause while we waited for it.
+                    self.db.transition_task(self.task_id, 'stop_settled')
                 self.check()
 
     def close_browser(self):
@@ -177,10 +188,9 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
 
     @app.middleware('http')
     async def local_origin(request: Request, call_next):
-        origin = request.headers.get('origin')
-        if request.method not in ('GET', 'HEAD', 'OPTIONS') and origin:
-            parsed = urlparse(origin)
-            if parsed.hostname not in ('127.0.0.1', 'localhost') or parsed.port not in (8765, 5173) or parsed.scheme != 'http':
+        origins = request.headers.getlist('origin')
+        if request.method not in ('GET', 'HEAD', 'OPTIONS') and origins:
+            if len(origins) != 1 or not allowed_origin(origins[0]):
                 return JSONResponse({'detail':'仅允许从本机工具页面操作'}, status_code=403)
         return await call_next(request)
 
@@ -193,6 +203,15 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
         try:
             return db.get_task(task_id)
         except KeyError:
+            raise HTTPException(404, '任务不存在或已删除') from None
+
+    @contextmanager
+    def result_snapshot(task_id):
+        manager.check()
+        try:
+            with db.task_snapshot(task_id) as snapshot:
+                yield snapshot
+        except TaskNotFound:
             raise HTTPException(404, '任务不存在或已删除') from None
 
     @app.get('/api/health')
@@ -282,7 +301,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
             if manager.task_id == task_id:
                 manager.stop()
             else:
-                db.update_task(task_id, stop_requested=True)
+                db.transition_task(task_id, 'request_stop')
             return db.get_task(task_id)
 
     @app.post('/api/tasks/{task_id}/refresh')
@@ -314,39 +333,43 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
 
     @app.get('/api/tasks/{task_id}/comments')
     def comments(task_id: str, filters: Filters = Depends(query_filters), page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
-        task = task_or_404(task_id)
-        if task['kind'] != 'comments':
-            raise HTTPException(400, '该任务是视频列表，请切换到视频结果')
-        offset = (page-1)*page_size
-        items, total, missing = db.read_comment_page(task_id, filters, limit=page_size, offset=offset)
+        with result_snapshot(task_id) as snapshot:
+            task = snapshot.task
+            if task['kind'] != 'comments':
+                raise HTTPException(400, '该任务是视频列表，请切换到视频结果')
+            items, total, missing = snapshot.comments(filters, limit=page_size, offset=(page-1)*page_size)
         return {'items':items, 'total':total, 'page':page, 'page_size':page_size,
                 'unknown_authors':task['unknown_authors'], 'missing_times':missing,
                 'collection_complete':task['collection_complete'], 'verification_complete':task['verification_complete']}
 
     @app.get('/api/tasks/{task_id}/videos')
     def liked_videos(task_id: str, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200)):
-        task = task_or_404(task_id)
-        if task['kind'] not in ('likes', 'recommendations'):
-            raise HTTPException(400, '该任务是评论采集，请切换到评论结果')
-        offset = (page - 1) * page_size
-        rows, total = db.read_liked_video_page(task_id, limit=page_size, offset=offset)
+        with result_snapshot(task_id) as snapshot:
+            task = snapshot.task
+            if task['kind'] not in ('likes', 'recommendations'):
+                raise HTTPException(400, '该任务是评论采集，请切换到评论结果')
+            rows, total = snapshot.videos(limit=page_size, offset=(page-1)*page_size)
         fields = ('video_id', 'title', 'author_name', 'author_douyin_id', 'created_at', 'time_text', 'video_url')
         return {'items':[{key: row[key] for key in fields} for row in rows],
                 'total':total, 'page':page, 'page_size':page_size,
-                'collection_complete':task['collection_complete'], 'visibility':task['visibility']}
+                'collection_complete':task['collection_complete'], 'visibility':task['visibility'],
+                'unknown_authors':task['unknown_authors'], 'verification_complete':task['verification_complete']}
 
     @app.get('/api/tasks/{task_id}/export.txt')
     def export(task_id: str, filters: Filters = Depends(query_filters)):
-        task = task_or_404(task_id)
+        with result_snapshot(task_id) as snapshot:
+            task = snapshot.task
+            if task['kind'] in ('likes', 'recommendations'):
+                items, _ = snapshot.videos()
+            else:
+                items, _, _ = snapshot.comments(filters)
         if task['kind'] in ('likes', 'recommendations'):
-            items = db.read_liked_videos(task_id)
             if task['visibility'] == 'private' and not items:
                 label = '推荐' if task['kind'] == 'recommendations' else '喜欢'
                 raise HTTPException(409, f'该账号未公开{label}列表，没有可导出的记录')
             payload = export_likes_txt(items, task['collection_complete'])
             filename = f"douyin-{task['kind']}-{task_id[:12]}.txt"
         else:
-            items = select_comments(db.read_comments(task_id), filters)
             payload = export_txt(items, task['collection_complete'])
             filename = f"douyin-comments-{task['video_id'] or task_id[:12]}.txt"
         return Response(payload, media_type='text/plain; charset=utf-8', headers={'Content-Disposition':f'attachment; filename="{filename}"','Cache-Control':'no-store'})

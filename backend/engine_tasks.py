@@ -49,15 +49,12 @@ class CommentTask:
     async def verify_saved_authors(self):
         with self.phase('authors'):
             await self.hydrate_authors()
-        task = self.db.get_task(self.task_id)
-        self.db.update_task(self.task_id, verification_complete=not task['unknown_authors'],
-            status='private' if task['visibility'] == 'private' else 'completed' if task['collection_complete'] else 'partial')
+        self.db.transition_task(self.task_id, 'finish', verify_only=True)
 
     def fail_task(self, status, message=None, **fields):
-        if getattr(self, '_verifying', False):
-            message = self.db.get_task(self.task_id)['error'] or message
-            fields.pop('collection_complete', None)
-        self.db.update_task(self.task_id, status=status, error=message, **fields)
+        event = {'paused': 'pause', 'waiting_login': 'waiting', 'partial': 'fail'}[status]
+        self.db.transition_task(self.task_id, event, message=message,
+                                verify_only=getattr(self, '_verifying', False), **fields)
 
     def write(self, operation, *args, **kwargs):
         began = time.perf_counter()
@@ -193,6 +190,7 @@ class CommentTask:
         self._verifying = verify_only
         try:
             self.check_stop()
+            self.db.transition_task(self.task_id, 'start', verify_only=verify_only)
             task = self.db.get_task(self.task_id)
             if verify_only:
                 await self.verify_saved_authors()
@@ -208,7 +206,6 @@ class CommentTask:
                     raise PageFailure("未能解析视频链接，请确认分享链接仍可访问。")
                 self.db.update_task(self.task_id, video_id=video_id)
             if not verify_only:
-                self.db.update_task(self.task_id, status="running", error=None)
                 if not task.get("title"):
                     try:
                         detail = await self.request(lambda: self.client.get_video_by_id(video_id))
@@ -233,11 +230,7 @@ class CommentTask:
             if task['verify_authors']:
                 with self.phase('authors'):
                     await self.hydrate_authors()
-            verified = not self.db.get_task(self.task_id)['unknown_authors']
-            complete = bool(self.db.get_task(self.task_id).get("collection_complete"))
-            self.db.update_task(self.task_id, verification_complete=verified,
-                                status="completed" if complete else "partial",
-                                error=errors[0] if errors else None)
+            self.db.transition_task(self.task_id, 'finish', message=errors[0] if errors else None)
         except StopRequested as exc:
             self.fail_task("paused", getattr(exc, "public_reason", None))
         except ManualActionRequired as exc:
@@ -398,19 +391,19 @@ class LikesTask(CommentTask):
         self._verifying = verify_only
         try:
             self.check_stop()
+            self.db.transition_task(self.task_id, 'start', verify_only=verify_only)
             task = self.db.get_task(self.task_id)
             if verify_only:
                 await self.verify_saved_authors()
                 return
-            self.db.update_task(self.task_id, status="running", error=None)
             target = await self.resolve_target(task)
             self.target_identity = target
             self.db.update_task(self.task_id, target_sec_uid=target["sec_uid"],
                                 target_nickname=target["nickname"], visibility=target["visibility"],
                                 title=f"{target['nickname'] or task['target_account']}的{self.list_label}列表")
             if target["visibility"] == "private":
-                self.db.update_task(self.task_id, status="private", collection_complete=False,
-                                    error=f"该账号未公开{self.list_label}列表")
+                self.db.transition_task(self.task_id, 'private', collection_complete=False,
+                                        message=f"该账号未公开{self.list_label}列表")
                 return
             error = None
             if not verify_only:
@@ -426,9 +419,7 @@ class LikesTask(CommentTask):
             if task['verify_authors']:
                 with self.phase('authors'):
                     await self.hydrate_authors()
-            complete = self.db.get_task(self.task_id)["collection_complete"]
-            self.db.update_task(self.task_id, status="completed" if complete else "partial", error=error,
-                                verification_complete=not self.db.liked_authors(self.task_id))
+            self.db.transition_task(self.task_id, 'finish', message=error)
         except StopRequested as exc:
             self.fail_task("paused", getattr(exc, "public_reason", None))
         except ManualActionRequired as exc:

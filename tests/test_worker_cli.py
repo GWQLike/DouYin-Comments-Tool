@@ -12,6 +12,39 @@ import pytest
 from backend.db import Database
 
 
+@pytest.mark.parametrize('status', ['completed', 'private', 'paused'])
+@pytest.mark.parametrize('exception', ['StopRequested', 'PageFailure'])
+def test_cli_cleanup_does_not_overwrite_final_task_conclusion(tmp_path, status, exception):
+    code = """
+import runpy
+import sys
+import types
+
+db_path, profile_path, task_id, status, exception = sys.argv[1:]
+async def run_engine(db, args, stop, waiting):
+    from backend import crawler
+    db.update_task(task_id, status=status, collection_complete=status == 'completed', error='已保存的结论')
+    raise getattr(crawler, exception)('迟到的退出异常')
+engine = types.ModuleType('backend.engine')
+engine.run_engine = run_engine
+sys.modules[engine.__name__] = engine
+sys.argv = ['backend.crawler', '--db', db_path, '--profile', profile_path, '--task', task_id]
+runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+"""
+    db_path = tmp_path / 'worker.sqlite3'
+    db = Database(db_path)
+    task = db.create_task('')
+    result = subprocess.run(
+        [sys.executable, '-c', code, str(db_path), str(tmp_path / 'profile'), task['id'], status, exception],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, encoding='utf-8',
+        timeout=15, env={**os.environ, 'PYTHONUTF8': '1'},
+    )
+    assert result.returncode == (0 if exception == 'StopRequested' else 1), result.stderr
+    saved = db.get_task(task['id'])
+    assert saved['status'] == status and saved['error'] == '已保存的结论'
+    assert saved['collection_complete'] == (status == 'completed')
+
+
 def test_cli_rejects_unsupported_likes_range_before_adapter_creation(tmp_path):
     code = """
 import runpy

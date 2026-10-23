@@ -8,6 +8,25 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from .migrations import initialize_database
+from .task_state import transition_fields
+
+
+class TaskNotFound(KeyError):
+    pass
+
+
+class TaskSnapshot:
+    """Task metadata and result reads pinned to one SQLite transaction."""
+    def __init__(self, db, con, task_id):
+        self.db, self.con, self.task_id = db, con, task_id
+        self.task = db._get_task(con, task_id)
+
+    def comments(self, filters, *, limit=None, offset=0):
+        return self.db._read_comment_page(self.con, self.task_id, filters, limit=limit, offset=offset)
+
+    def videos(self, *, limit=None, offset=0):
+        rows = self.db._read_liked_videos(self.con, self.task_id, limit=limit, offset=offset)
+        return rows, self.task['video_count']
 
 
 class Database:
@@ -48,23 +67,34 @@ class Database:
 
     def get_task(self, task_id):
         with self.connection() as con:
-            row = con.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
-            if row is None:
-                raise KeyError(task_id)
-            result = dict(row)
-            counts = con.execute("SELECT SUM(parent_id='') AS main_count,SUM(parent_id!='') AS reply_count FROM comments WHERE task_id=?", (task_id,)).fetchone()
-            result.update({k: counts[k] or 0 for k in ('main_count', 'reply_count')})
-            result['unknown_authors'] = con.execute('''SELECT COUNT(*) FROM (
+            con.execute('BEGIN')
+            return self._get_task(con, task_id)
+
+    @contextmanager
+    def task_snapshot(self, task_id):
+        with self.connection() as con:
+            con.execute('BEGIN')
+            yield TaskSnapshot(self, con, task_id)
+
+    @staticmethod
+    def _get_task(con, task_id):
+        row = con.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+        if row is None:
+            raise TaskNotFound(task_id)
+        result = dict(row)
+        counts = con.execute("SELECT SUM(parent_id='') AS main_count,SUM(parent_id!='') AS reply_count FROM comments WHERE task_id=?", (task_id,)).fetchone()
+        result.update({k: counts[k] or 0 for k in ('main_count', 'reply_count')})
+        result['unknown_authors'] = con.execute('''SELECT COUNT(*) FROM (
                 SELECT DISTINCT author_key,source_uid,source_sec_uid FROM author_verifications v
                 WHERE task_id=? AND status!='confirmed' AND
                 (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
                  OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id)))''', (task_id,)).fetchone()[0]
-            result['video_count'] = con.execute('SELECT COUNT(*) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0]
-            result['collection_complete'] = bool(result['collection_complete'])
-            result['verify_authors'] = bool(result['verify_authors'])
-            result['verification_complete'] = result['unknown_authors'] == 0
-            result.pop('stop_requested', None)
-            return result
+        result['video_count'] = con.execute('SELECT COUNT(*) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0]
+        result['collection_complete'] = bool(result['collection_complete'])
+        result['verify_authors'] = bool(result['verify_authors'])
+        result['verification_complete'] = result['unknown_authors'] == 0
+        result.pop('stop_requested', None)
+        return result
 
     def list_tasks(self):
         with self.connection() as con:
@@ -102,6 +132,11 @@ class Database:
         return results
 
     def update_task(self, task_id, **fields):
+        with self.connection() as con:
+            self._update_task(con, task_id, fields)
+
+    @staticmethod
+    def _update_task(con, task_id, fields):
         allowed = {'source_url', 'video_id', 'title', 'status', 'error', 'stop_requested', 'collection_complete', 'verification_complete',
                    'target_sec_uid', 'target_nickname', 'visibility', 'verify_authors'}
         if 'verify_authors' in fields and type(fields['verify_authors']) is not bool:
@@ -109,8 +144,21 @@ class Database:
         if not fields.keys() <= allowed:
             raise ValueError('Unknown task fields: ' + ','.join(fields.keys() - allowed))
         fields['updated_at'] = time.time()
+        con.execute('UPDATE tasks SET ' + ','.join(f'{k}=?' for k in fields) + ' WHERE id=?', (*fields.values(), task_id))
+
+    def transition_task(self, task_id, event, **options):
         with self.connection() as con:
-            con.execute('UPDATE tasks SET ' + ','.join(f'{k}=?' for k in fields) + ' WHERE id=?', (*fields.values(), task_id))
+            con.execute('BEGIN IMMEDIATE')
+            if event == 'finish':
+                task = self._get_task(con, task_id)
+            else:
+                row = con.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
+                if row is None:
+                    raise TaskNotFound(task_id)
+                task = dict(row)
+            fields = transition_fields(task, event, **options)
+            if fields:
+                self._update_task(con, task_id, fields)
 
     def should_stop(self, task_id):
         with self.connection() as con:
@@ -307,8 +355,13 @@ class Database:
         LEFT JOIN author_verifications v ON v.task_id=c.task_id AND v.record_id=c.comment_id'''
 
     def read_comment_page(self, task_id, filters, *, limit, offset=0):
+        with self.connection() as con:
+            con.execute('BEGIN')
+            return self._read_comment_page(con, task_id, filters, limit=limit, offset=offset)
+
+    def _read_comment_page(self, con, task_id, filters, *, limit, offset=0):
         from .search import format_comment, match_text
-        if type(limit) is not int or limit < 0 or type(offset) is not int or offset < 0:
+        if (limit is not None and (type(limit) is not int or limit < 0)) or type(offset) is not int or offset < 0:
             raise ValueError('Invalid comment page')
         params = [task_id]
         where = ' WHERE c.task_id=?'
@@ -323,23 +376,21 @@ class Database:
                 params.append(bound)
         query = self.COMMENT_SELECT + where
         order = ' ORDER BY c.created_at IS NULL,c.created_at DESC,c.comment_id DESC'
-        with self.connection() as con:
-            con.execute('BEGIN')
-            missing = con.execute('SELECT COUNT(*) FROM comments WHERE task_id=? AND created_at IS NULL', (task_id,)).fetchone()[0]
-            if not filters.keyword:
-                total = con.execute('SELECT COUNT(*) FROM (' + query + ')', params).fetchone()[0]
-                rows = con.execute(query + order + ' LIMIT ? OFFSET ?', (*params, min(limit, 2**63-1), min(offset, 2**63-1)))
-                items = [format_comment(dict(row)) for row in rows]
-            else:
-                total, items = 0, []
-                cursor = con.execute(query + order, params)
-                while batch := cursor.fetchmany(256):
-                    for row in batch:
-                        matched, kind, score = match_text(row['text'], filters)
-                        if matched:
-                            if offset <= total < offset + limit:
-                                items.append(format_comment(dict(row), kind, score))
-                            total += 1
+        missing = con.execute('SELECT COUNT(*) FROM comments WHERE task_id=? AND created_at IS NULL', (task_id,)).fetchone()[0]
+        if not filters.keyword:
+            total = con.execute('SELECT COUNT(*) FROM (' + query + ')', params).fetchone()[0]
+            rows = con.execute(query + order + ' LIMIT ? OFFSET ?', (*params, min(limit, 2**63-1) if limit is not None else -1, min(offset, 2**63-1)))
+            items = [format_comment(dict(row)) for row in rows]
+        else:
+            total, items = 0, []
+            cursor = con.execute(query + order, params)
+            while batch := cursor.fetchmany(256):
+                for row in batch:
+                    matched, kind, score = match_text(row['text'], filters)
+                    if matched:
+                        if offset <= total and (limit is None or total < offset + limit):
+                            items.append(format_comment(dict(row), kind, score))
+                        total += 1
         return items, total, missing
 
     def read_comments(self, task_id):

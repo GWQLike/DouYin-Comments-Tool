@@ -30,7 +30,7 @@ def date_bound(value, end=False):
         if len(value) == 10 and end:
             d = datetime.combine(d.date() + timedelta(days=1), time.min, SHANGHAI) - timedelta(microseconds=1)
         return d.timestamp()
-    except (ValueError, OverflowError):
+    except (ValueError, OverflowError, OSError):
         raise ValueError('时间格式无效，请使用日期或日期与时间') from None
 
 

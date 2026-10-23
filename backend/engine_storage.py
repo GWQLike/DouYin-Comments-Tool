@@ -58,8 +58,8 @@ class ActivityPages:
         return self.task.db.get_checkpoint(self.task.task_id, self.task.list_kind)
 
     def private(self):
-        self.task.db.update_task(self.task.task_id, visibility='private', status='private',
-            collection_complete=False, error=f'该账号未公开{self.task.list_label}列表')
+        self.task.db.transition_task(self.task.task_id, 'private', visibility='private',
+            collection_complete=False, message=f'该账号未公开{self.task.list_label}列表')
 
     def normalize(self, response, cursor):
         if self.task.list_is_private(response):
