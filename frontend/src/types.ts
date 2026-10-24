@@ -21,6 +21,7 @@ export interface Task {
   status: TaskStatus;
   created_at: number;
   updated_at: number;
+  result_version?: number;
   error: string | null;
   main_count: number;
   reply_count: number;
@@ -41,6 +42,7 @@ export interface CollectedVideo {
 }
 
 export interface VideoPage {
+  result_version?: number;
   items: CollectedVideo[];
   total: number;
   page: number;
@@ -82,6 +84,7 @@ export interface Comment {
 }
 
 export interface CommentPage {
+  result_version?: number;
   items: Comment[];
   total: number;
   page: number;

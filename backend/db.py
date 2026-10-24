@@ -76,60 +76,40 @@ class Database:
             con.execute('BEGIN')
             yield TaskSnapshot(self, con, task_id)
 
+    TASK_SELECT = '''SELECT t.*,s.main_count,s.reply_count,s.video_count,s.unknown_authors,s.result_version
+        FROM tasks t JOIN task_stats s ON s.task_id=t.id'''
+
     @staticmethod
-    def _get_task(con, task_id):
-        row = con.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
-        if row is None:
-            raise TaskNotFound(task_id)
+    def _format_task(row):
         result = dict(row)
-        counts = con.execute("SELECT SUM(parent_id='') AS main_count,SUM(parent_id!='') AS reply_count FROM comments WHERE task_id=?", (task_id,)).fetchone()
-        result.update({k: counts[k] or 0 for k in ('main_count', 'reply_count')})
-        result['unknown_authors'] = con.execute('''SELECT COUNT(*) FROM (
-                SELECT DISTINCT author_key,source_uid,source_sec_uid FROM author_verifications v
-                WHERE task_id=? AND status!='confirmed' AND
-                (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
-                 OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id)))''', (task_id,)).fetchone()[0]
-        result['video_count'] = con.execute('SELECT COUNT(*) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0]
         result['collection_complete'] = bool(result['collection_complete'])
         result['verify_authors'] = bool(result['verify_authors'])
         result['verification_complete'] = result['unknown_authors'] == 0
         result.pop('stop_requested', None)
         return result
 
+    @classmethod
+    def _get_task(cls, con, task_id):
+        row = con.execute(cls.TASK_SELECT + ' WHERE t.id=?', (task_id,)).fetchone()
+        if row is None:
+            raise TaskNotFound(task_id)
+        return cls._format_task(row)
+
     def list_tasks(self):
         with self.connection() as con:
-            # Aggregate each child table once; avoid opening and recounting every
-            # historical task separately during the frontend's polling loop.
-            rows = con.execute('''SELECT t.*,
-                COALESCE(c.main_count,0) AS main_count,
-                COALESCE(c.reply_count,0) AS reply_count,
-                COALESCE(v.video_count,0) AS video_count,
-                COALESCE(a.unknown_authors,0) AS unknown_authors
-                FROM tasks t
-                LEFT JOIN (
-                    SELECT task_id,SUM(parent_id='') AS main_count,
-                        SUM(parent_id!='') AS reply_count FROM comments GROUP BY task_id
-                ) c ON c.task_id=t.id
-                LEFT JOIN (
-                    SELECT task_id,COUNT(*) AS unknown_authors FROM (
-                        SELECT DISTINCT task_id,author_key,source_uid,source_sec_uid
-                        FROM author_verifications v WHERE status!='confirmed' AND
-                        (EXISTS(SELECT 1 FROM comments c WHERE c.task_id=v.task_id AND c.comment_id=v.record_id)
-                         OR EXISTS(SELECT 1 FROM liked_videos l WHERE l.task_id=v.task_id AND l.video_id=v.record_id))) GROUP BY task_id
-                ) a ON a.task_id=t.id
-                LEFT JOIN (
-                    SELECT task_id,COUNT(*) AS video_count FROM liked_videos GROUP BY task_id
-                ) v ON v.task_id=t.id
-                ORDER BY t.created_at DESC''').fetchall()
-        results = []
-        for row in rows:
-            task = dict(row)
-            task['collection_complete'] = bool(task['collection_complete'])
-            task['verify_authors'] = bool(task['verify_authors'])
-            task['verification_complete'] = task['unknown_authors'] == 0
-            task.pop('stop_requested', None)
-            results.append(task)
-        return results
+            return [self._format_task(row) for row in con.execute(self.TASK_SELECT + ' ORDER BY t.created_at DESC')]
+
+    def check_statistics(self, task_id=None):
+        from .task_stats import inspect
+        with self.connection() as con:
+            con.execute('BEGIN')
+            return inspect(con, task_id)
+
+    def rebuild_statistics(self, task_id=None):
+        from .task_stats import rebuild
+        with self.connection() as con:
+            con.execute('BEGIN IMMEDIATE')
+            return rebuild(con, task_id)
 
     def update_task(self, task_id, **fields):
         with self.connection() as con:
@@ -308,7 +288,10 @@ class Database:
             if not old or old['identity_state'] != 'conflict':
                 con.execute('''UPDATE author_verifications SET source_conflict=1,status='conflict',
                     failure_kind='identity_conflict' WHERE task_id=? AND author_key=?''', (task_id, author_key))
-        con.execute('INSERT OR REPLACE INTO authors(task_id,author_key,uid,sec_uid,douyin_id,nickname,identity_state) VALUES(?,?,?,?,?,?,?)',
+        con.execute('''INSERT INTO authors(task_id,author_key,uid,sec_uid,douyin_id,nickname,identity_state)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(task_id,author_key) DO UPDATE SET
+            uid=excluded.uid,sec_uid=excluded.sec_uid,douyin_id=excluded.douyin_id,
+            nickname=excluded.nickname,identity_state=excluded.identity_state''',
                     (task_id, author_key, *(merged[k] for k in ('uid','sec_uid','douyin_id','nickname','identity_state'))))
         return merged
 
@@ -375,8 +358,9 @@ class Database:
                 where += f' AND c.created_at{operator}?'
                 params.append(bound)
         query = self.COMMENT_SELECT + where
-        order = ' ORDER BY c.created_at IS NULL,c.created_at DESC,c.comment_id DESC'
-        missing = con.execute('SELECT COUNT(*) FROM comments WHERE task_id=? AND created_at IS NULL', (task_id,)).fetchone()[0]
+        order = ' ORDER BY c.created_at DESC,c.comment_id DESC'
+        stats = con.execute('SELECT missing_times FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
+        missing = stats[0] if stats else 0
         if not filters.keyword:
             total = con.execute('SELECT COUNT(*) FROM (' + query + ')', params).fetchone()[0]
             rows = con.execute(query + order + ' LIMIT ? OFFSET ?', (*params, min(limit, 2**63-1) if limit is not None else -1, min(offset, 2**63-1)))
@@ -397,7 +381,7 @@ class Database:
         # A single SQL read yields a consistent export/search snapshot, including hydrated identity.
         with self.connection() as con:
             return [dict(r) for r in con.execute(self.COMMENT_SELECT +
-                ' WHERE c.task_id=? ORDER BY c.created_at IS NULL,c.created_at DESC,c.comment_id DESC', (task_id,))]
+                ' WHERE c.task_id=? ORDER BY c.created_at DESC,c.comment_id DESC', (task_id,))]
 
     def session_get(self):
         with self.connection() as con:
@@ -457,7 +441,8 @@ class Database:
             # explicit read transaction keeps the count and rows consistent
             # even when the collector commits another page between these reads.
             con.execute('BEGIN')
-            total = con.execute('SELECT COUNT(*) FROM liked_videos WHERE task_id=?', (task_id,)).fetchone()[0]
+            stats = con.execute('SELECT video_count FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
+            total = stats[0] if stats else 0
             rows = self._read_liked_videos(con, task_id, limit=limit, offset=offset)
         return rows, total
 
@@ -469,7 +454,7 @@ class Database:
         if type(offset) is not int or offset < 0:
             raise ValueError('Invalid video page offset')
         task = con.execute('SELECT list_order FROM tasks WHERE id=?', (task_id,)).fetchone()
-        order = 'collected_order IS NULL,collected_order ASC,created_at DESC,video_id DESC' if task and task['list_order'] == 'activity' else 'created_at IS NULL,created_at DESC,video_id DESC'
+        order = 'collected_order ASC NULLS LAST,created_at DESC,video_id DESC' if task and task['list_order'] == 'activity' else 'created_at DESC,video_id DESC'
         sql = '''SELECT liked_videos.*,v.status AS verification_state,v.douyin_id AS verified_number,
             v.nickname AS verified_name FROM liked_videos LEFT JOIN author_verifications v
             ON v.task_id=liked_videos.task_id AND v.record_id=liked_videos.video_id

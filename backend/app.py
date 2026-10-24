@@ -401,6 +401,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
             items, total, missing = snapshot.comments(filters, limit=page_size, offset=(page-1)*page_size)
         return {'items':items, 'total':total, 'page':page, 'page_size':page_size,
                 'unknown_authors':task['unknown_authors'], 'missing_times':missing,
+                'result_version':task['result_version'],
                 'collection_complete':task['collection_complete'], 'verification_complete':task['verification_complete']}
 
     @app.get('/api/tasks/{task_id}/videos')
@@ -413,6 +414,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
         fields = ('video_id', 'title', 'author_name', 'author_douyin_id', 'created_at', 'time_text', 'video_url')
         return {'items':[{key: row[key] for key in fields} for row in rows],
                 'total':total, 'page':page, 'page_size':page_size,
+                'result_version':task['result_version'],
                 'collection_complete':task['collection_complete'], 'visibility':task['visibility'],
                 'unknown_authors':task['unknown_authors'], 'verification_complete':task['verification_complete']}
 

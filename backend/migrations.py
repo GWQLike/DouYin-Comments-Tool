@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .task_stats import INDEXES as STATS_INDEXES, migrate as migrate_task_stats, trigger_sql
+
 
 class DatabaseMigrationError(RuntimeError):
     """Initialization failed; callers must not start services against this database."""
@@ -205,7 +207,8 @@ def _author_verification_records(con: sqlite3.Connection) -> None:
 
 # Append new versions; never rewrite an applied migration to upgrade existing data.
 MIGRATIONS = (Migration(1, _adopt_legacy_schema), Migration(2, _reply_observations),
-              Migration(3, _comment_field_sources), Migration(4, _author_verification_records))
+              Migration(3, _comment_field_sources), Migration(4, _author_verification_records),
+              Migration(5, migrate_task_stats))
 
 _REQUIRED_COLUMNS = {
     'tasks': 'id source_url video_id title status created_at updated_at error stop_requested '
@@ -220,12 +223,16 @@ _REQUIRED_COLUMNS = {
                     'author_key uid sec_uid action_at collected_order',
     'author_verifications': 'task_id record_id author_key source_uid source_sec_uid source_number source_conflict '
                            'uid sec_uid douyin_id nickname status failure_kind attempts last_attempt_at',
+    'task_stats': 'task_id main_count reply_count video_count missing_times unknown_authors result_version',
+    'verification_groups': 'task_id author_key source_uid source_sec_uid pending_records',
 }
 _PRIMARY_KEYS = {
     'tasks': ['id'], 'comments': ['task_id', 'comment_id'],
     'authors': ['task_id', 'author_key'], 'checkpoints': ['task_id', 'thread_id'],
     'session': ['id'], 'liked_videos': ['task_id', 'video_id'],
     'author_verifications': ['task_id', 'record_id'],
+    'task_stats': ['task_id'],
+    'verification_groups': ['task_id', 'author_key', 'source_uid', 'source_sec_uid'],
 }
 
 
@@ -238,7 +245,7 @@ def _validate_schema(con: sqlite3.Connection) -> None:
         primary = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
         if primary != _PRIMARY_KEYS[table]:
             raise DatabaseMigrationError(f'数据库表 {table} 的主键不匹配')
-    for name, (table, columns) in {**_INDEXES, **_REPLY_INDEXES}.items():
+    for name, (table, columns) in {**_INDEXES, **_REPLY_INDEXES, **STATS_INDEXES}.items():
         actual = con.execute(f'PRAGMA index_info({name})').fetchall()
         expected = [column.strip().split()[0] for column in columns.split(',')]
         indexes = {row[1] for row in con.execute(f'PRAGMA index_list({table})')}
@@ -246,6 +253,10 @@ def _validate_schema(con: sqlite3.Connection) -> None:
             raise DatabaseMigrationError(f'数据库索引 {name} 不匹配')
     if con.execute('SELECT 1 FROM session WHERE id=1').fetchone() is None:
         raise DatabaseMigrationError('数据库会话记录缺失')
+    for name, expected in trigger_sql().items():
+        row = con.execute("SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?", (name,)).fetchone()
+        if row is None or ' '.join(row[0].split()) != ' '.join(expected.split()):
+            raise DatabaseMigrationError(f'数据库统计触发器 {name} 不匹配')
 
 
 def _create_backup(path: Path, old_version: int, new_version: int) -> Path:

@@ -114,19 +114,15 @@ def test_get_task_pins_counts_to_first_metadata_read(tmp_path, monkeypatch):
     db = Database(tmp_path / 'test.db')
     tid = seed(db, 'comments')
     before = db.get_task(tid)
-    connection = db.connection
+    format_task = Database._format_task
     writes = []
 
-    @contextmanager
-    def interleaved_connection():
-        with connection() as con:
-            def trace(sql):
-                if 'SUM(parent_id=' in sql and not writes:
-                    writes.append(True)
-                    commit_change(db, tid, 'comments', 'collect')
-            con.set_trace_callback(trace)
-            yield con
-    monkeypatch.setattr(db, 'connection', interleaved_connection)
+    def after_row_read(row):
+        if not writes:
+            writes.append(True)
+            commit_change(db, tid, 'comments', 'collect')
+        return format_task(row)
+    monkeypatch.setattr(Database, '_format_task', staticmethod(after_row_read))
     assert db.get_task(tid) == before and writes
     assert db.get_task(tid)['main_count'] == 2
 
