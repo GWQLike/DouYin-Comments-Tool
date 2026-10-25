@@ -18,6 +18,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .db import Database, TaskNotFound
 from .preflight import PreflightRejected, check_task_conditions
 from .search import Filters, export_txt, export_likes_txt, date_bound
+from .search_cache import KeywordMatchCache
 from .task_state import ACTIVE
 from .runtime_control import ProcessLease, OwnershipError, owner_alive, POLL_SECONDS
 from .urls import parse_input
@@ -224,7 +225,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
             # recovery write to this database, regardless of saved task status.
             worker_guard = ProcessLease(data_dir, 'worker').acquire(timeout=4)
             try:
-                db = Database(data_dir / 'comments.sqlite3')
+                db = Database(data_dir / 'comments.sqlite3', keyword_cache=KeywordMatchCache())
                 db.recover_interrupted()
                 db.session_set('logged_out')
                 manager = manager_factory(db, data_dir)
@@ -241,8 +242,11 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
                 try:
                     manager.stop()
                 finally:
-                    if hasattr(manager, 'close_browser'):
-                        manager.close_browser()
+                    try:
+                        if hasattr(manager, 'close_browser'):
+                            manager.close_browser()
+                    finally:
+                        db.keyword_cache.clear()
 
     app = FastAPI(title='抖音评论检索工作台', lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])

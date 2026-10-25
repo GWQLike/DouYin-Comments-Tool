@@ -30,8 +30,9 @@ class TaskSnapshot:
 
 
 class Database:
-    def __init__(self, path):
+    def __init__(self, path, *, keyword_cache=None):
         self.path = str(Path(path).resolve())
+        self.keyword_cache = keyword_cache
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         initialize_database(Path(self.path))
 
@@ -148,6 +149,8 @@ class Database:
     def delete_task(self, task_id):
         with self.connection() as con:
             con.execute('DELETE FROM tasks WHERE id=?', (task_id,))
+        if self.keyword_cache is not None:
+            self.keyword_cache.discard(task_id)
 
     def recover_interrupted(self):
         with self.connection() as con:
@@ -344,6 +347,7 @@ class Database:
 
     def _read_comment_page(self, con, task_id, filters, *, limit, offset=0):
         from .search import format_comment, match_text
+        from .search_cache import match_key
         if (limit is not None and (type(limit) is not int or limit < 0)) or type(offset) is not int or offset < 0:
             raise ValueError('Invalid comment page')
         params = [task_id]
@@ -359,23 +363,65 @@ class Database:
                 params.append(bound)
         query = self.COMMENT_SELECT + where
         order = ' ORDER BY c.created_at DESC,c.comment_id DESC'
-        stats = con.execute('SELECT missing_times FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
+        stats = con.execute('SELECT missing_times,result_version FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
         missing = stats[0] if stats else 0
         if not filters.keyword:
             total = con.execute('SELECT COUNT(*) FROM (' + query + ')', params).fetchone()[0]
             rows = con.execute(query + order + ' LIMIT ? OFFSET ?', (*params, min(limit, 2**63-1) if limit is not None else -1, min(offset, 2**63-1)))
             items = [format_comment(dict(row)) for row in rows]
         else:
+            cache = self.keyword_cache
+            build = None
+            if cache is not None and stats is not None:
+                key = match_key(task_id, stats['result_version'], filters)
+                matches = cache.get(key)
+                if matches is not None:
+                    items = self._matched_comment_page(con, task_id, matches, limit, offset)
+                    return items, len(matches), missing
+                build = cache.begin(key)
             total, items = 0, []
-            cursor = con.execute(query + order, params)
-            while batch := cursor.fetchmany(256):
-                for row in batch:
-                    matched, kind, score = match_text(row['text'], filters)
-                    if matched:
-                        if offset <= total and (limit is None or total < offset + limit):
-                            items.append(format_comment(dict(row), kind, score))
-                        total += 1
+            cursor = None
+            try:
+                cursor = con.execute(query + order, params)
+                while batch := cursor.fetchmany(256):
+                    for row in batch:
+                        matched, kind, score = match_text(row['text'], filters)
+                        if matched:
+                            if offset <= total and (limit is None or total < offset + limit):
+                                items.append(format_comment(dict(row), kind, score))
+                            total += 1
+                            if cache is not None:
+                                cache.append(build, row['comment_id'], kind, score)
+                if cache is not None:
+                    cache.finish(build, lambda: self._current_result_version(task_id))
+            finally:
+                if cursor is not None:
+                    cursor.close()
+                if cache is not None:
+                    cache.abort(build)
         return items, total, missing
+
+    def _current_result_version(self, task_id):
+        try:
+            with self.connection() as con:
+                row = con.execute('SELECT result_version FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
+                return row[0] if row else None
+        except sqlite3.Error:
+            # Failure to admit a cache entry must not fail a valid result read.
+            return None
+
+    def _matched_comment_page(self, con, task_id, matches, limit, offset):
+        from .search import format_comment
+        end = len(matches) if limit is None else min(len(matches), offset + limit)
+        items = []
+        for start in range(offset, end, 256):
+            batch = matches[start:min(start + 256, end)]
+            ids = [item[0] for item in batch]
+            rows = con.execute(self.COMMENT_SELECT +
+                ' WHERE c.task_id=? AND c.comment_id IN (' + ','.join('?' for _ in ids) + ')', (task_id, *ids))
+            by_id = {row['comment_id']: dict(row) for row in rows}
+            items.extend(format_comment(by_id[cid], kind, score) for cid, kind, score in batch)
+        return items
 
     def read_comments(self, task_id):
         # A single SQL read yields a consistent export/search snapshot, including hydrated identity.
