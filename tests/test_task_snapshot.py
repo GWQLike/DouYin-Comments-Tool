@@ -38,8 +38,11 @@ def commit_change(db, tid, kind, change):
         db.delete_task(tid)
 
 
-def interleave(db, kind, change, monkeypatch):
-    name = '_read_comment_page' if kind == 'comments' else '_read_liked_videos'
+def interleave(db, kind, change, monkeypatch, *, export=False):
+    if export:
+        name = '_iter_comment_batches' if kind == 'comments' else '_iter_video_batches'
+    else:
+        name = '_read_comment_page' if kind == 'comments' else '_read_liked_videos'
     original = getattr(db, name)
     writes = []
 
@@ -87,7 +90,7 @@ def test_export_uses_same_snapshot_for_warning_and_records(tmp_path, monkeypatch
             expected = export_txt(select_comments(db.read_comments(tid), Filters()), False)
         else:
             expected = export_likes_txt(db.read_liked_videos(tid), False)
-        writes = interleave(db, kind, change, monkeypatch)
+        writes = interleave(db, kind, change, monkeypatch, export=True)
         response = client.get(f'/api/tasks/{tid}/export.txt')
         assert writes == [True] and response.status_code == 200
         assert response.content == expected

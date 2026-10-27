@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager, contextmanager
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -16,8 +17,9 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .db import Database, TaskNotFound
+from .exports import ExportCancelled, ExportResponse, ExportStore, write_batches
 from .preflight import PreflightRejected, check_task_conditions
-from .search import Filters, export_txt, export_likes_txt, date_bound
+from .search import Filters, COMMENT_FIELDS, VIDEO_FIELDS, date_bound
 from .search_cache import KeywordMatchCache
 from .task_state import ACTIVE
 from .runtime_control import ProcessLease, OwnershipError, owner_alive, POLL_SECONDS
@@ -230,6 +232,8 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
                 db.session_set('logged_out')
                 manager = manager_factory(db, data_dir)
                 app.state.db, app.state.manager = db, manager
+                app.state.exports = ExportStore(data_dir / 'export-temp')
+                app.state.exports.recover()
             finally:
                 worker_guard.release()
             try:
@@ -424,22 +428,28 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
 
     @app.get('/api/tasks/{task_id}/export.txt')
     def export(task_id: str, filters: Filters = Depends(query_filters)):
-        with result_snapshot(task_id) as snapshot:
-            task = snapshot.task
-            if task['kind'] in ('likes', 'recommendations'):
-                items, _ = snapshot.videos()
-            else:
-                items, _, _ = snapshot.comments(filters)
-        if task['kind'] in ('likes', 'recommendations'):
-            if task['visibility'] == 'private' and not items:
-                label = '推荐' if task['kind'] == 'recommendations' else '喜欢'
-                raise HTTPException(409, f'该账号未公开{label}列表，没有可导出的记录')
-            payload = export_likes_txt(items, task['collection_complete'])
-            filename = f"douyin-{task['kind']}-{task_id[:12]}.txt"
-        else:
-            payload = export_txt(items, task['collection_complete'])
-            filename = f"douyin-comments-{task['video_id'] or task_id[:12]}.txt"
-        return Response(payload, media_type='text/plain; charset=utf-8', headers={'Content-Disposition':f'attachment; filename="{filename}"','Cache-Control':'no-store'})
+        def generate(job):
+            with result_snapshot(task_id) as snapshot:
+                task = snapshot.task
+                if task['kind'] in ('likes', 'recommendations'):
+                    if task['visibility'] == 'private' and not task['video_count']:
+                        label = '推荐' if task['kind'] == 'recommendations' else '喜欢'
+                        raise HTTPException(409, f'该账号未公开{label}列表，没有可导出的记录')
+                    batches, fields = snapshot.video_batches(job.check_cancel), VIDEO_FIELDS
+                    filename = f"douyin-{task['kind']}-{task_id[:12]}.txt"
+                else:
+                    batches, fields = snapshot.comment_batches(filters, job.check_cancel), COMMENT_FIELDS
+                    filename = f"douyin-comments-{task['video_id'] or task_id[:12]}.txt"
+                snapshot.con.set_progress_handler(lambda: int(job.cancelled.is_set()), 1000)
+                try:
+                    write_batches(job.path, batches, fields, task['collection_complete'], job.check_cancel)
+                except sqlite3.OperationalError:
+                    job.check_cancel()
+                    raise
+                finally:
+                    snapshot.con.set_progress_handler(None, 0)
+            return filename
+        return ExportResponse(app.state.exports, generate)
 
     dist = ROOT / 'frontend' / 'dist'
     if (dist / 'assets').is_dir():

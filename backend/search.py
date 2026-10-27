@@ -103,24 +103,30 @@ def select_comments(rows, filters):
     return result
 
 
+COMMENT_FIELDS = (('用户名','nickname'),('抖音号','douyin_id'),('评论内容','text'),('时间','time_text'),('IP 属地','ip_label'))
+VIDEO_FIELDS = (('视频标题','title'),('作者名称','author_name'),('作者抖音号','author_douyin_id'),
+                ('发布时间','time_text'),('视频链接','video_url'))
+INCOMPLETE_NOTICE = '采集尚未完成，仅导出当前已获取的匹配结果。'
+
+
 def export_txt(items, collection_complete=True):
-    return export_records(items, (
-        ('用户名','nickname'),('抖音号','douyin_id'),('评论内容','text'),('时间','time_text'),('IP 属地','ip_label')),
-        collection_complete)
+    return export_records(items, COMMENT_FIELDS, collection_complete)
 
 
 def export_likes_txt(items, collection_complete=True):
-    return export_records(items, (
-        ('视频标题','title'),('作者名称','author_name'),('作者抖音号','author_douyin_id'),
-        ('发布时间','time_text'),('视频链接','video_url')), collection_complete)
+    return export_records(items, VIDEO_FIELDS, collection_complete)
+
+
+def record_block(item, fields):
+    def clean(value):
+        return str(value or '未提供').replace('\\','\\\\').replace('\r\n','\n').replace('\r','\n').replace('\n','\\n')
+    return '\r\n'.join(f'{label}：{clean(item.get(field))}' for label,field in fields)
 
 
 def export_records(items, fields, collection_complete=True):
-    def clean(value):
-        return str(value or '未提供').replace('\\','\\\\').replace('\r\n','\n').replace('\r','\n').replace('\n','\\n')
     blocks = []
     if not collection_complete:
-        blocks.append('采集尚未完成，仅导出当前已获取的匹配结果。')
+        blocks.append(INCOMPLETE_NOTICE)
     for item in items:
-        blocks.append('\r\n'.join(f'{label}：{clean(item.get(field))}' for label,field in fields))
+        blocks.append(record_block(item, fields))
     return ('\r\n\r\n'.join(blocks) + ('\r\n' if blocks else '')).encode('utf-8-sig')

@@ -28,6 +28,12 @@ class TaskSnapshot:
         rows = self.db._read_liked_videos(self.con, self.task_id, limit=limit, offset=offset)
         return rows, self.task['video_count']
 
+    def comment_batches(self, filters, check_cancel):
+        return self.db._iter_comment_batches(self.con, self.task_id, filters, check_cancel)
+
+    def video_batches(self, check_cancel):
+        return self.db._iter_video_batches(self.con, self.task_id, check_cancel)
+
 
 class Database:
     def __init__(self, path, *, keyword_cache=None):
@@ -345,11 +351,7 @@ class Database:
             con.execute('BEGIN')
             return self._read_comment_page(con, task_id, filters, limit=limit, offset=offset)
 
-    def _read_comment_page(self, con, task_id, filters, *, limit, offset=0):
-        from .search import format_comment, match_text
-        from .search_cache import match_key
-        if (limit is not None and (type(limit) is not int or limit < 0)) or type(offset) is not int or offset < 0:
-            raise ValueError('Invalid comment page')
+    def _comment_query(self, task_id, filters):
         params = [task_id]
         where = ' WHERE c.task_id=?'
         if filters.account:
@@ -361,7 +363,14 @@ class Database:
             if bound is not None:
                 where += f' AND c.created_at{operator}?'
                 params.append(bound)
-        query = self.COMMENT_SELECT + where
+        return self.COMMENT_SELECT + where, params
+
+    def _read_comment_page(self, con, task_id, filters, *, limit, offset=0):
+        from .search import format_comment, match_text
+        from .search_cache import match_key
+        if (limit is not None and (type(limit) is not int or limit < 0)) or type(offset) is not int or offset < 0:
+            raise ValueError('Invalid comment page')
+        query, params = self._comment_query(task_id, filters)
         order = ' ORDER BY c.created_at DESC,c.comment_id DESC'
         stats = con.execute('SELECT missing_times,result_version FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
         missing = stats[0] if stats else 0
@@ -422,6 +431,34 @@ class Database:
             by_id = {row['comment_id']: dict(row) for row in rows}
             items.extend(format_comment(by_id[cid], kind, score) for cid, kind, score in batch)
         return items
+
+    def _iter_comment_batches(self, con, task_id, filters, check_cancel):
+        from .search import format_comment, match_text
+        from .search_cache import match_key
+        check_cancel()
+        if filters.keyword and self.keyword_cache is not None:
+            stats = con.execute('SELECT result_version FROM task_stats WHERE task_id=?', (task_id,)).fetchone()
+            matches = self.keyword_cache.get(match_key(task_id, stats[0], filters)) if stats else None
+            if matches is not None:
+                for offset in range(0, len(matches), 256):
+                    check_cancel()
+                    yield self._matched_comment_page(con, task_id, matches, 256, offset)
+                return
+        # A cold export streams its matches instead of retaining another full ID list.
+        query, params = self._comment_query(task_id, filters)
+        cursor = con.execute(query + ' ORDER BY c.created_at DESC,c.comment_id DESC', params)
+        try:
+            while rows := cursor.fetchmany(256):
+                items = []
+                for row in rows:
+                    check_cancel()
+                    matched, kind, score = match_text(row['text'], filters)
+                    if matched:
+                        items.append(format_comment(dict(row), kind, score))
+                if items:
+                    yield items
+        finally:
+            cursor.close()
 
     def read_comments(self, task_id):
         # A single SQL read yields a consistent export/search snapshot, including hydrated identity.
@@ -493,32 +530,48 @@ class Database:
         return rows, total
 
     @staticmethod
-    def _read_liked_videos(con, task_id, *, limit=None, offset=0):
-        from .search import time_text
-        if limit is not None and (type(limit) is not int or limit < 0):
-            raise ValueError('Invalid video page limit')
-        if type(offset) is not int or offset < 0:
-            raise ValueError('Invalid video page offset')
+    def _video_query(con, task_id):
         task = con.execute('SELECT list_order FROM tasks WHERE id=?', (task_id,)).fetchone()
         order = 'collected_order ASC NULLS LAST,created_at DESC,video_id DESC' if task and task['list_order'] == 'activity' else 'created_at DESC,video_id DESC'
         sql = '''SELECT liked_videos.*,v.status AS verification_state,v.douyin_id AS verified_number,
             v.nickname AS verified_name FROM liked_videos LEFT JOIN author_verifications v
             ON v.task_id=liked_videos.task_id AND v.record_id=liked_videos.video_id
             WHERE liked_videos.task_id=? ORDER BY ''' + order
-        params = (task_id,)
+        return sql
+
+    @classmethod
+    def _read_liked_videos(cls, con, task_id, *, limit=None, offset=0):
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError('Invalid video page limit')
+        if type(offset) is not int or offset < 0:
+            raise ValueError('Invalid video page offset')
+        sql, params = cls._video_query(con, task_id), (task_id,)
         if limit is not None or offset:
             sql += ' LIMIT ? OFFSET ?'
             # Arbitrarily large API page numbers should remain empty pages,
             # rather than overflowing SQLite's signed integer binding.
             params += (min(limit, 2**63 - 1) if limit is not None else -1, min(offset, 2**63 - 1))
-        rows = [dict(r) for r in con.execute(sql, params)]
-        for row in rows:
-            state, number, name = (row.pop(key) for key in ('verification_state', 'verified_number', 'verified_name'))
-            if state is not None:
-                row['author_douyin_id'] = number if state == 'confirmed' else ''
-                row['author_name'] = row['author_name'] or name or ''
-            row['time_text'] = time_text(row['created_at'])
-        return rows
+        return [cls._format_video(dict(row)) for row in con.execute(sql, params)]
+
+    @staticmethod
+    def _format_video(row):
+        from .search import time_text
+        state, number, name = (row.pop(key) for key in ('verification_state', 'verified_number', 'verified_name'))
+        if state is not None:
+            row['author_douyin_id'] = number if state == 'confirmed' else ''
+            row['author_name'] = row['author_name'] or name or ''
+        row['time_text'] = time_text(row['created_at'])
+        return row
+
+    def _iter_video_batches(self, con, task_id, check_cancel):
+        check_cancel()
+        cursor = con.execute(self._video_query(con, task_id), (task_id,))
+        try:
+            while rows := cursor.fetchmany(256):
+                check_cancel()
+                yield [self._format_video(dict(row)) for row in rows]
+        finally:
+            cursor.close()
 
     def liked_authors(self, task_id):
         return [{**r, 'uid': r['source_uid'], 'sec_uid': r['source_sec_uid']}
