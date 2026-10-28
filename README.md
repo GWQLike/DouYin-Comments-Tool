@@ -60,9 +60,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1
 
 ## 采集原理
 
-![采集原理：前端创建任务，经本地服务调用 MediaCrawler，逐页保存数据与断点，供搜索和导出使用](docs/images/architecture.png)
+![采集原理：条件预检与任务管理，经 MediaCrawler 采集并逐页保存，作者核实可选；查询复用版本缓存，TXT 分批生成后释放快照再下载](docs/images/architecture.png)
 
 Web 服务管理任务和专用 Chrome，采集 worker 调用 MediaCrawler 的 `DouYinCrawler.start()`。评论走内核的评论分页；喜欢、推荐和作者核实通过扩展接入同一个客户端。每页结果与游标一起写入 SQLite，搜索与导出读取已保存的数据。
+
+关键词查询按结果版本复用匹配缓存，翻页只读取当前页。TXT 在同一个读取快照内分批生成临时文件，关闭快照后再下载；完成、取消或失败后清理临时文件，保留原有导出格式。
 
 内核固定在提交 `5d547f45862ca2d4b404e5a51775879d579b29d4`，兼容补丁为 `workbench.2`。源码随仓库保存，初始化不需要再拉取上游。补丁、原始文件和校验清单见 [vendor/patches](vendor/patches/README.md)。
 
