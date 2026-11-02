@@ -33,7 +33,11 @@ def pooled_client_type(upstream, owner):
             return await asyncio.get_running_loop().run_in_executor(
                 owner.sign_executor, helpers.get_a_bogus_from_js, uri, query, user_agent)
         finally:
-            owner.metrics["signature_seconds"] += time.monotonic() - began
+            elapsed = time.monotonic() - began
+            owner.metrics["signature_seconds"] += elapsed
+            diagnostic = getattr(owner, "diagnostics", None)
+            if diagnostic:
+                diagnostic.add("signature_seconds", elapsed)
 
     class PooledClient(upstream):
         async def _signed(self, method, uri, values, headers):
@@ -200,17 +204,23 @@ class DouyinAdapter:
             async def start_browser():
                 # Retain the context manager before its startup await so even an
                 # interrupted driver startup has an owned object to close.
+                if getattr(self, 'diagnostics', None):
+                    self.diagnostics.set_phase('browser_driver')
                 self.playwright_manager = async_playwright()
                 self.playwright = await self.playwright_manager.start()
                 self.check_stop()
                 endpoint = os.environ.get('DOUYIN_CDP_URL')
                 if not endpoint:
                     raise PageFailure('未连接专用 Chrome，请从工作台启动采集。')
+                if getattr(self, 'diagnostics', None):
+                    self.diagnostics.set_phase('browser_connect')
                 self.cdp_manager = module('tools.cdp_browser').CDPBrowserManager(connection_url=endpoint)
                 self.context = await self.cdp_manager.launch_and_connect(self.playwright)
                 self.check_stop()
 
             await self.interruptible(start_browser())
+            if getattr(self, 'diagnostics', None):
+                self.diagnostics.set_phase('navigation')
             self.page = next((page for page in self.context.pages if urlsplit(page.url).hostname in ('www.douyin.com', 'douyin.com')), None)
             if self.page is None:
                 self.page = next((page for page in self.context.pages if page.url == 'about:blank'), None) or await self.context.new_page()
@@ -242,12 +252,16 @@ class DouyinAdapter:
                 playwright_page=self.page, cookie_dict={},
             )
             await self.refresh_cookies(force=True)
+            if getattr(self, 'diagnostics', None):
+                self.diagnostics.set_phase('session')
             return self
         except BaseException:
             await self.__aexit__(None, None, None)
             raise
 
     async def __aexit__(self, *_):
+        if getattr(self, 'diagnostics', None):
+            self.diagnostics.set_phase('shutdown')
         self._closing = True
         if self._manual_task and not self._manual_task.done():
             self._manual_task.cancel()
@@ -334,7 +348,13 @@ class DouyinAdapter:
                 self.require_manual()
             challenge = not isinstance(self.policy, StableRequestPolicy) or self.policy.state.get('challenge_pending', True)
             self._manual_task = asyncio.create_task(self._manual_prompt() if challenge else self._login_prompt())
-        await asyncio.shield(self._manual_task)
+        began = time.monotonic()
+        try:
+            await asyncio.shield(self._manual_task)
+        finally:
+            diagnostic = getattr(self, 'diagnostics', None)
+            if diagnostic:
+                diagnostic.add('manual_wait_seconds', time.monotonic() - began)
 
     async def _login_prompt(self):
         await self.wait_for_login()
@@ -427,6 +447,9 @@ class DouyinAdapter:
             self._complete_outcome(outcome, generation)
 
     def _complete_outcome(self, outcome, generation):
+        diagnostic = getattr(self, 'diagnostics', None)
+        if diagnostic:
+            diagnostic.outcome(outcome.kind.value)
         counts = self.metrics['request_outcomes']
         counts[outcome.kind.value] = counts.get(outcome.kind.value, 0) + 1
         if outcome.kind == Kind.TEMPORARY:
@@ -467,6 +490,9 @@ class DouyinAdapter:
         generation = self.policy.generation
         began = time.monotonic()
         self.check_request_budget()
+        diagnostic = getattr(self, "diagnostics", None)
+        if diagnostic:
+            diagnostic.add("requests")
         self.metrics["http_requests"] += 1
         # Use a fixed vocabulary; never log URLs, account IDs or query strings.
         category = "short_url" if raw else {
@@ -495,7 +521,10 @@ class DouyinAdapter:
             self._complete_outcome(outcome, generation)
         finally:
             self._http_active -= 1
-            self.metrics["http_seconds"] += time.monotonic() - began
+            elapsed = time.monotonic() - began
+            self.metrics["http_seconds"] += elapsed
+            if diagnostic:
+                diagnostic.add("network_seconds", elapsed)
         data = None
         try:
             if (response.status_code < 400 and not raw) or response.status_code == 403:

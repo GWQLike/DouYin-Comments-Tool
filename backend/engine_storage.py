@@ -2,6 +2,7 @@
 from backend.crawler import PageFailure, normalize_comment
 from backend.likes import normalize_liked_video
 from backend.responses import validate_result
+from backend.diagnostics import local_work
 
 
 class CommentPages:
@@ -14,6 +15,7 @@ class CommentPages:
     def checkpoint(self):
         return self.task.db.get_checkpoint(self.task.task_id, self.parent_id)
 
+    @local_work
     def normalize(self, response, cursor):
         response = validate_result(response)
         if response.get('has_more') not in (0, 1, '0', '1', False, True):
@@ -39,6 +41,7 @@ class CommentPages:
             rows.extend(normalize_comment(reply, self.video_id, self.parent_id or normalized['comment_id'], preview=True) for reply in previews)
         return {'rows': rows, 'done': done, 'next_cursor': int(next_cursor), 'has_cursor': 'cursor' in response}
 
+    @local_work
     def filter(self, rows, done):
         return rows
 
@@ -61,6 +64,7 @@ class ActivityPages:
         self.task.db.transition_task(self.task.task_id, 'private', visibility='private',
             collection_complete=False, message=f'该账号未公开{self.task.list_label}列表')
 
+    @local_work
     def normalize(self, response, cursor):
         if self.task.list_is_private(response):
             return {'private': True}
@@ -76,6 +80,7 @@ class ActivityPages:
         return {'rows': [{**normalize_liked_video(row), 'action_at': self.task.action_time(row)} for row in raw],
                 'done': response['has_more'] in (0, '0', False), 'next_cursor': int(next_cursor), 'has_cursor': 'max_cursor' in response}
 
+    @local_work
     def filter(self, rows, done):
         if rows:
             self.visibility = 'public'

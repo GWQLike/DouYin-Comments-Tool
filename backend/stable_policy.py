@@ -113,7 +113,13 @@ class StableRequestPolicy(RequestPolicy):
     async def wait_ready(self):
         while self.paused:
             self.check_control()
-            await self.sleep(.2)
+            began_wait = self.clock()
+            try:
+                await self.sleep(.2)
+            finally:
+                diagnostic = getattr(self, 'diagnostics', None)
+                if diagnostic:
+                    diagnostic.add('manual_wait_seconds', self.clock() - began_wait)
         self.check_control()
 
     async def prepare_start(self, prepare=None):
@@ -129,7 +135,16 @@ class StableRequestPolicy(RequestPolicy):
                     self.check_control()
                     if revision != self.generation or self.paused:
                         break
-                    await self.sleep(min(.2, due - self.wall_clock()))
+                    diagnostic = getattr(self, 'diagnostics', None)
+                    now = self.wall_clock()
+                    category = ('protection_wait_seconds' if self.state.get('cooldown_until', 0) > now or self.state.get('guard_until', 0) > now else
+                                'backoff_wait_seconds' if self._level else 'normal_wait_seconds')
+                    began_wait = self.clock()
+                    try:
+                        await self.sleep(min(.2, due - self.wall_clock()))
+                    finally:
+                        if diagnostic:
+                            diagnostic.add(category, self.clock() - began_wait)
                 if revision != self.generation or self.paused:
                     continue
                 self.check_control()

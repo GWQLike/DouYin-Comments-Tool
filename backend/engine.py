@@ -1,10 +1,15 @@
 """MediaCrawler lifecycle bridge used by the worker (no legacy fallback)."""
+import asyncio
 import json
 import time
+import threading
 from pathlib import Path
 
 from backend.upstream import ENGINE_VERSION, module
 from backend.preflight import check_task_conditions
+
+
+SUMMARY_INTERVAL = 10
 
 
 class WorkbenchRuntime:
@@ -18,9 +23,15 @@ class WorkbenchRuntime:
         self.extension = self.transport = None
         self.started = time.perf_counter()
         self.ready_at = None
+        self.diagnostics = None
 
     def open_transport(self):
         self.transport = self.transport_factory(Path(self.args.profile).resolve(), self.stop, self.waiting)
+        self.transport.diagnostics = self.diagnostics
+        if getattr(self.transport, 'policy', None) is not None:
+            self.transport.policy.diagnostics = self.diagnostics
+        if self.diagnostics:
+            self.diagnostics.set_phase('transport')
         self.transport.session_closed = lambda: self.db.session_set(
             'logged_out', '专用浏览器已关闭，请重新打开登录窗口。')
         self.transport.max_requests = getattr(self.args, 'max_requests', 0)
@@ -34,6 +45,8 @@ class WorkbenchRuntime:
         if transport.policy.paused:
             await transport.wait_for_manual()
         self.ready_at = time.perf_counter()
+        if self.diagnostics:
+            self.diagnostics.set_phase('session')
 
     def create_extension(self, engine, transport):
         if not self.args.task:
@@ -50,6 +63,7 @@ class WorkbenchRuntime:
         if self.transport and hasattr(self.transport, 'performance_summary'):
             report.update(self.transport.performance_summary())
         return {**report, 'engine': 'MediaCrawler.DouYinCrawler', 'engine_version': ENGINE_VERSION,
+                'run_id': self.diagnostics.run_id if self.diagnostics else None,
                 'task_id': self.args.task, 'startup_seconds': round((self.ready_at or now) - self.started, 3),
                 'collection_seconds': round(now - self.ready_at, 3) if self.ready_at else 0,
                 'worker_elapsed_seconds': round(now - self.started, 3)}
@@ -59,8 +73,28 @@ async def run_engine(db, args, stop, waiting, *, runtime=None):
     if args.task:
         check_task_conditions(db.get_task(args.task), verify_only=args.verify_only)
     runtime = runtime or WorkbenchRuntime(db, args, stop, waiting)
-    engine = module('media_platform.douyin.core').DouYinCrawler(runtime=runtime)
+    from backend.diagnostics import Diagnostics
+    diagnostics = Diagnostics(Path(db.path).parent)
+    runtime.diagnostics = diagnostics
+    diagnostics.emit('start')
+    stopped = threading.Event()
+    def heartbeat():
+        while not stopped.wait(SUMMARY_INTERVAL):
+            diagnostics.emit('periodic')
+    ticker = threading.Thread(target=heartbeat, name='collection-diagnostics', daemon=True)
+    ticker.start()
     try:
+        diagnostics.set_phase('engine_import')
+        engine = module('media_platform.douyin.core').DouYinCrawler(runtime=runtime)
         await engine.start()
+        diagnostics.termination = 'returned'
+    except BaseException as exc:
+        from backend.crawler import StopRequested
+        diagnostics.termination = 'cancelled' if isinstance(exc, (asyncio.CancelledError, StopRequested)) else 'error'
+        raise
     finally:
+        stopped.set()
+        ticker.join()
+        diagnostics.emit('finish')
+        diagnostics.close()
         print('PERFORMANCE ' + json.dumps(runtime.report(), ensure_ascii=False, sort_keys=True), flush=True)

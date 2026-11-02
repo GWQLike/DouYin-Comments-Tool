@@ -137,7 +137,7 @@ class WorkerManager:
             env['PYTHONUTF8'] = '1'
             env['DOUYIN_CDP_URL'] = endpoint
             env.setdefault('PLAYWRIGHT_BROWSERS_PATH', str(ROOT / 'data' / 'playwright-browsers'))
-            self.log = open(self.data_dir / 'worker.log', 'a', encoding='utf-8')
+            self.log = open(os.devnull, 'w', encoding='utf-8')
             try:
                 self.process = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.PIPE, stdout=self.log, stderr=self.log,
                                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)

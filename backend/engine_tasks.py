@@ -29,6 +29,10 @@ class CommentTask:
 
     @contextmanager
     def phase(self, name):
+        diagnostic = getattr(self.client, 'diagnostics', None)
+        previous_phase = diagnostic.phase if diagnostic else None
+        if diagnostic:
+            diagnostic.set_phase(name)
         before = self.db.get_task(self.task_id)
         transport = getattr(self.client, 'metrics', {})
         policy = getattr(getattr(self.client, 'policy', None), 'metrics', {})
@@ -48,6 +52,10 @@ class CommentTask:
                 'authors_resolved': max(0, before['unknown_authors'] - after['unknown_authors']) if name == 'authors' else 0,
             }
 
+            if diagnostic:
+                diagnostic.emit('phase_end')
+                diagnostic.set_phase(previous_phase)
+
     async def verify_saved_authors(self):
         with self.phase('authors'):
             await self.hydrate_authors()
@@ -60,10 +68,28 @@ class CommentTask:
 
     def write(self, operation, *args, **kwargs):
         began = time.perf_counter()
+        diagnostic = getattr(self.client, 'diagnostics', None)
+        operation_name = getattr(operation, '__name__', '')
+        is_page = operation_name in ('save_page', 'save_likes_page')
+        is_verification = operation_name == 'finish_verifications'
+        before = self.db.get_task(self.task_id) if diagnostic and (is_page or is_verification) else None
         try:
-            return operation(*args, **kwargs)
+            result = operation(*args, **kwargs)
+            if before is not None:
+                after = self.db.get_task(self.task_id)
+                if is_verification:
+                    diagnostic.add('authors_resolved', before['unknown_authors']-after['unknown_authors'])
+                else:
+                    added = sum(after[key]-before[key] for key in ('main_count','reply_count','video_count'))
+                    rows = args[2] if operation_name == 'save_page' else args[1]
+                    diagnostic.add('new_records', added)
+                    diagnostic.add('duplicate_records', len(rows)-added)
+            return result
         finally:
-            self.metrics['database_write_seconds'] += time.perf_counter() - began
+            elapsed = time.perf_counter() - began
+            self.metrics['database_write_seconds'] += elapsed
+            if diagnostic:
+                diagnostic.add('local_seconds', elapsed)
 
     def check_stop(self) -> None:
         if self.stop():
