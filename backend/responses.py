@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 from enum import Enum
 
-from backend.crawler import ControlledStop, ManualActionRequired, PageFailure
+from backend.errors import ControlledStop, ManualActionRequired, PageFailure
 
 
 class Kind(str, Enum):

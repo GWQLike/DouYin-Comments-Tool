@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, quote, urljoin, urlsplit
 
-from backend.crawler import ManualActionRequired, PageFailure, StopRequested, ControlledStop
+from backend.errors import ManualActionRequired, PageFailure, StopRequested, ControlledStop
 from backend.responses import (Kind, Outcome, MALFORMED, TEMPORARY, LoginRequired,
     VerificationRequired, RequestFailure, NetworkPause, classify_http)
 from backend.stable_policy import StableRequestPolicy

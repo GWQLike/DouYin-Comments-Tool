@@ -5,7 +5,8 @@ import random
 import time
 from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Awaitable
-from backend.crawler import StopRequested, PageFailure, ManualActionRequired, _string, normalize_profile
+from backend.errors import StopRequested, PageFailure, ManualActionRequired
+from backend.crawler import _string, normalize_profile
 from backend.responses import LoginRequired, RequestFailure, RequestRejected, explicit_list_private, validate_result
 from backend.likes import account_key, public_number, profile_visibility
 

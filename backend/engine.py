@@ -89,7 +89,7 @@ async def run_engine(db, args, stop, waiting, *, runtime=None):
         await engine.start()
         diagnostics.termination = 'returned'
     except BaseException as exc:
-        from backend.crawler import StopRequested
+        from backend.errors import StopRequested
         diagnostics.termination = 'cancelled' if isinstance(exc, (asyncio.CancelledError, StopRequested)) else 'error'
         raise
     finally:

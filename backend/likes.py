@@ -11,10 +11,8 @@ import time
 import unicodedata
 from typing import Any
 
-from backend.crawler import (
-    Collector, ManualActionRequired, PageFailure, StopRequested,
-    _string, normalize_profile, validate_response,
-)
+from backend.errors import ManualActionRequired, PageFailure, StopRequested
+from backend.crawler import Collector, _string, normalize_profile, validate_response
 
 
 def account_key(value: Any) -> str:

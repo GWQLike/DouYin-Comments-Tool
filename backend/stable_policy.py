@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from email.utils import parsedate_to_datetime
 
-from backend.crawler import PageFailure, ControlledStop
+from backend.errors import PageFailure, ControlledStop
 from backend.request_policy import RequestPolicy
 
 

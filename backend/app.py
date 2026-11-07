@@ -119,7 +119,7 @@ class WorkerManager:
             try:
                 endpoint = self.browser.ensure()
             except Exception as exc:
-                from .crawler import PageFailure
+                from .errors import PageFailure
                 raise HTTPException(503, str(exc) if isinstance(exc, PageFailure) else '专用 Chrome 未能启动') from None
             if task_id:
                 self.db.transition_task(task_id, 'start', verify_only=verify, stop_requested=False)

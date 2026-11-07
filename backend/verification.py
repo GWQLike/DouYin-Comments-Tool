@@ -2,7 +2,8 @@
 import asyncio
 import time
 
-from .crawler import ManualActionRequired, PageFailure, StopRequested, normalize_profile
+from .errors import ManualActionRequired, PageFailure, StopRequested
+from .crawler import normalize_profile
 from .responses import LoginRequired, RequestRejected, NetworkPause
 
 

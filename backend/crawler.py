@@ -12,30 +12,8 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-# Running with -m otherwise creates two exception-class identities when the
-# adapter imports this module by its package name.
-if __name__ == "__main__":
-    sys.modules.setdefault("backend.crawler", sys.modules[__name__])
-
-
-class StopRequested(Exception):
-    pass
-
-
-class ControlledStop(StopRequested):
-    """A locally authored control reason safe to show in the workbench."""
-    def __init__(self, reason, *, kind=None):
-        super().__init__()
-        self.public_reason = reason
-        self.kind = kind
-
-
-class PageFailure(Exception):
-    pass
-
-
-class ManualActionRequired(Exception):
-    pass
+# Re-export for historical collectors and callers of the existing worker module.
+from backend.errors import StopRequested, ControlledStop, PageFailure, ManualActionRequired
 
 
 def _string(value: Any) -> str:

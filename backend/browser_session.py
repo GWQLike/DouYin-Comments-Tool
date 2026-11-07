@@ -6,7 +6,7 @@ import atexit
 import json
 
 from backend.upstream import module
-from backend.crawler import PageFailure
+from backend.errors import PageFailure
 
 
 class DedicatedBrowser:

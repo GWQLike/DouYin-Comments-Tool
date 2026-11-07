@@ -1,5 +1,5 @@
 """Reject unsupported collection conditions before opening a platform session."""
-from backend.crawler import PageFailure
+from backend.errors import PageFailure
 
 
 class PreflightRejected(PageFailure):

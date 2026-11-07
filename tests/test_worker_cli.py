@@ -100,7 +100,7 @@ class FakeAdapter:
         pass
 
     async def __aenter__(self):
-        from backend.crawler import StopRequested, PageFailure, ManualActionRequired
+        from backend.errors import StopRequested, PageFailure, ManualActionRequired
         exceptions = dict(StopRequested=StopRequested, PageFailure=PageFailure,
                           ManualActionRequired=ManualActionRequired, ValueError=ValueError)
         raise exceptions[kind]('safe startup reason' if kind in ('PageFailure', 'ManualActionRequired') else 'private-cookie-token')
@@ -166,7 +166,7 @@ class FakeAdapter:
     def __init__(self, profile, stop, waiting):
         self.waiting = waiting
     async def __aenter__(self):
-        # The CLI alias is in sys.modules; runpy need not attach a package attr.
+        # Only the transport attributes used by the engine are needed here.
         self.context = self.page = self.client = object()
         self.policy = types.SimpleNamespace(check_control=lambda: None, paused=False)
         return self
