@@ -29,7 +29,8 @@ class ForbidCollectors(importlib.abc.MetaPathFinder):
             raise AssertionError('unexpected legacy import: ' + fullname)
 sys.meta_path.insert(0, ForbidCollectors())
 for name in ('errors', 'responses', 'preflight', 'stable_policy', 'browser_session',
-             'douyin_adapter', 'engine', 'runtime_control'):
+             'douyin_adapter', 'engine', 'runtime_control', 'normalization', 'activity',
+             'engine_storage'):
     importlib.import_module('backend.' + name)
 assert not any(name.startswith('media_platform.') for name in sys.modules)
 ''')

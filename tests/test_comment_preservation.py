@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend import migrations
-from backend.crawler import normalize_comment
+from backend.normalization import normalize_comment
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
 from backend.engine_storage import CommentPages

@@ -1,7 +1,6 @@
 """Raw-page adapter; database records and cursor advance share one transaction."""
 from backend.errors import PageFailure
-from backend.crawler import normalize_comment
-from backend.likes import normalize_liked_video
+from backend.normalization import normalize_comment, normalize_liked_video
 from backend.responses import validate_result
 from backend.diagnostics import local_work
 

@@ -5,14 +5,15 @@ An empty response, absent permission field, or 403 never proves a private list.
 """
 from __future__ import annotations
 
-import math
 import re
 import time
 import unicodedata
 from typing import Any
 
 from backend.errors import ManualActionRequired, PageFailure, StopRequested
-from backend.crawler import Collector, _string, normalize_profile, validate_response
+from backend.crawler import Collector, normalize_profile, validate_response
+from backend.normalization import _string, normalize_liked_video
+from backend.activity import profile_visibility
 
 
 def account_key(value: Any) -> str:
@@ -24,40 +25,6 @@ def public_number(user: dict) -> str:
     if value in ("", "0"):
         value = _string(user.get("short_id")).strip()
     return "" if value == "0" else value
-
-
-def profile_visibility(user: dict) -> str:
-    # The profile schema defines this as an optional boolean. In particular,
-    # None/0/"false" and guessed favorite_permission codes are not evidence.
-    flag = user.get("show_favorite_list")
-    if flag is False:
-        return "private"
-    if flag is True:
-        return "public"
-    return "unknown"
-
-
-def normalize_liked_video(raw: dict) -> dict:
-    video_id = _string(raw.get("aweme_id"))
-    if not re.fullmatch(r"[0-9]{1,32}", video_id):
-        raise PageFailure("视频列表中存在无效视频 ID，本页未确认完成。")
-    author = raw.get("author")
-    author = author if isinstance(author, dict) else {}
-    uid, sec_uid = (_string(author.get(key)).strip() for key in ("uid", "sec_uid"))
-    uid, sec_uid = ("" if value == "0" else value for value in (uid, sec_uid))
-    number = _string(author.get("unique_id")).strip()
-    number = "" if number == "0" else number
-    try:
-        stamp = float(raw.get("create_time"))
-        stamp = int(stamp) if math.isfinite(stamp) and 0 < stamp < 253402300800 else None
-    except (TypeError, ValueError, OverflowError):
-        stamp = None
-    return {
-        "video_id": video_id, "title": _string(raw.get("desc")),
-        "author_name": _string(author.get("nickname")), "author_douyin_id": number,
-        "created_at": stamp, "video_url": f"https://www.douyin.com/video/{video_id}",
-        "uid": uid, "sec_uid": sec_uid, "author_key": uid or sec_uid or f"video:{video_id}",
-    }
 
 
 class LikesCollector(Collector):

@@ -6,12 +6,13 @@ import time
 from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Awaitable
 from backend.errors import StopRequested, PageFailure, ManualActionRequired
-from backend.crawler import _string, normalize_profile
+from backend.crawler import normalize_profile
+from backend.normalization import _string
 from backend.responses import LoginRequired, RequestFailure, RequestRejected, explicit_list_private, validate_result
-from backend.likes import account_key, public_number, profile_visibility
+from backend.likes import account_key, public_number
+from backend.activity import profile_visibility, recommendation_time
 
 import re
-from backend.recommendations import recommendation_time
 from backend.runtime_control import StopSignal
 
 class CommentTask:
