@@ -3,7 +3,7 @@ import asyncio
 import time
 
 from .errors import ManualActionRequired, PageFailure, StopRequested
-from .crawler import normalize_profile
+from .identity import normalize_profile
 from .responses import LoginRequired, RequestRejected, NetworkPause
 
 

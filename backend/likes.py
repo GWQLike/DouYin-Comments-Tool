@@ -7,24 +7,13 @@ from __future__ import annotations
 
 import re
 import time
-import unicodedata
 from typing import Any
 
 from backend.errors import ManualActionRequired, PageFailure, StopRequested
-from backend.crawler import Collector, normalize_profile, validate_response
+from backend.crawler import Collector, validate_response
+from backend.identity import account_key, normalize_profile, public_number
 from backend.normalization import _string, normalize_liked_video
 from backend.activity import profile_visibility
-
-
-def account_key(value: Any) -> str:
-    return unicodedata.normalize("NFKC", _string(value).strip()).casefold()
-
-
-def public_number(user: dict) -> str:
-    value = _string(user.get("unique_id")).strip()
-    if value in ("", "0"):
-        value = _string(user.get("short_id")).strip()
-    return "" if value == "0" else value
 
 
 class LikesCollector(Collector):

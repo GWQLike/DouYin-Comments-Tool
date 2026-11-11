@@ -6,10 +6,9 @@ import time
 from contextlib import contextmanager, nullcontext
 from typing import Any, Callable, Awaitable
 from backend.errors import StopRequested, PageFailure, ManualActionRequired
-from backend.crawler import normalize_profile
+from backend.identity import account_key, normalize_profile, public_number
 from backend.normalization import _string
 from backend.responses import LoginRequired, RequestFailure, RequestRejected, explicit_list_private, validate_result
-from backend.likes import account_key, public_number
 from backend.activity import profile_visibility, recommendation_time
 
 import re

@@ -30,7 +30,7 @@ class ForbidCollectors(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, ForbidCollectors())
 for name in ('errors', 'responses', 'preflight', 'stable_policy', 'browser_session',
              'douyin_adapter', 'engine', 'runtime_control', 'normalization', 'activity',
-             'engine_storage'):
+             'identity', 'verification', 'engine_storage', 'engine_tasks'):
     importlib.import_module('backend.' + name)
 assert not any(name.startswith('media_platform.') for name in sys.modules)
 ''')

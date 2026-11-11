@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from backend.crawler import Collector, ManualActionRequired, PageFailure, StopRequested, normalize_comment, normalize_profile
+from backend.crawler import Collector, ManualActionRequired, PageFailure, StopRequested, normalize_comment
 from backend.db import Database
 from backend.douyin_adapter import DouyinAdapter, video_id_from_url
+from backend.identity import normalize_profile
 
 
 def comment(cid, *, user=None, replies=0, text="测试评论", stamp=1720000000):
@@ -395,6 +396,16 @@ def test_matching_identity_is_required_for_profile_and_legacy_id():
     assert normalize_profile({"user": {"uid": "999", "unique_id": "public"}}, {"uid": "123"}) is None
     assert normalize_profile({"user": {"short_id": "public"}}, {"uid": "123"}) is None
     assert normalize_profile({"user": {"uid": "123", "short_id": "0"}}, {"uid": "123"})["identity_state"] == "unknown"
+
+    author = {"uid": "123", "sec_uid": "author_sec", "nickname": "已有昵称"}
+    user = {"uid": "123", "sec_uid": "other_sec", "unique_id": " 0 ", "short_id": " public "}
+    assert normalize_profile({"user": user}, author) is None
+    user["sec_uid"] = "author_sec"
+    assert normalize_profile({"user": user}, author) == {
+        **author, "douyin_id": "public", "identity_state": "verified",
+    }
+    user["unique_id"] = " current.public "
+    assert normalize_profile({"user": user}, author)["douyin_id"] == "current.public"
 
 
 @pytest.mark.parametrize("url,expected", [
