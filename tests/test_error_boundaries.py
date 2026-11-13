@@ -25,7 +25,8 @@ def test_control_and_transport_import_without_legacy_collectors():
 import importlib, importlib.abc, sys
 class ForbidCollectors(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname in {'backend.crawler', 'backend.likes', 'backend.recommendations'}:
+        if (fullname in {'backend.crawler', 'backend.likes', 'backend.recommendations'}
+                or fullname.split('.')[0] in {'tests', 'baselines', 'support'}):
             raise AssertionError('unexpected legacy import: ' + fullname)
 sys.meta_path.insert(0, ForbidCollectors())
 for name in ('errors', 'responses', 'preflight', 'stable_policy', 'browser_session',
@@ -60,15 +61,16 @@ db_path, task_id, preload, kind = sys.argv[1:]
 if preload == 'True':
     import backend.crawler
 async def run_engine(db, args, stop, waiting):
-    from backend import crawler, errors
+    from backend import crawler, errors, worker
     from backend.responses import (Kind, Outcome, RequestFailure, RequestRejected,
         LoginRequired, VerificationRequired, NetworkPause)
     from backend.preflight import PreflightRejected
     from backend.stable_policy import ProtectionPause
     cli = sys.modules['__main__']
     assert cli is not crawler
-    for name in ('StopRequested', 'ControlledStop', 'PageFailure', 'ManualActionRequired'):
-        assert getattr(cli, name) is getattr(crawler, name) is getattr(errors, name)
+    assert cli.worker is crawler.worker is worker.worker
+    for name in ('StopRequested', 'PageFailure', 'ManualActionRequired'):
+        assert getattr(worker, name) is getattr(errors, name)
     assert issubclass(PreflightRejected, errors.PageFailure)
     assert issubclass(NetworkPause, errors.ControlledStop)
     assert issubclass(ProtectionPause, errors.ControlledStop)

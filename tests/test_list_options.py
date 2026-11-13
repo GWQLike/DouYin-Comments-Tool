@@ -6,10 +6,11 @@ from fastapi.testclient import TestClient
 
 from backend.app import create_app
 from backend.db import Database
-from backend.likes import LikesCollector, normalize_liked_video
-from backend.recommendations import RecommendationsCollector
-from test_likes_collector import FakeLikesClient, likes, video
-from test_recommendations_collector import FakeRecommendationsClient
+from baselines.likes import LikesCollector
+from backend.normalization import normalize_liked_video
+from baselines.recommendations import RecommendationsCollector
+from support.legacy_clients import FakeLikesClient, FakeRecommendationsClient
+from support.payloads import likes, video
 from test_search_api import FakeManager
 
 

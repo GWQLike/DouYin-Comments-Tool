@@ -3,7 +3,7 @@ from email.utils import formatdate
 
 import pytest
 
-from backend.crawler import StopRequested
+from backend.errors import StopRequested
 from backend.request_policy import RequestPolicy
 
 

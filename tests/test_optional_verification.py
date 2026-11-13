@@ -9,9 +9,8 @@ from backend.engine import WorkbenchRuntime, run_engine
 from backend.search import Filters, select_comments
 from test_search_api import FakeManager, row
 from test_likes_api import video
-from test_engine_integration import Fixture, SimulatedTransport, args_for, create, exported, fixture_signing
-from test_crawler import comment, page
-from test_likes_collector import profile
+from support.engine import Fixture, SimulatedTransport, args_for, create, exported, fixture_signing
+from support.payloads import comment, page, profile
 import httpx
 
 

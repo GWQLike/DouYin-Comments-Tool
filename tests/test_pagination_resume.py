@@ -5,14 +5,13 @@ from contextlib import closing
 import pytest
 
 from backend import migrations
-from backend.crawler import PageFailure, StopRequested, normalize_comment
+from backend.errors import PageFailure, StopRequested
+from backend.normalization import normalize_comment, normalize_liked_video
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
-from backend.likes import normalize_liked_video
 from backend.upstream import module
-from test_crawler import comment, page
-from test_engine_integration import Fixture, SimulatedTransport, args_for, create, fixture_signing
-from test_likes_collector import likes, video
+from support.payloads import comment, likes, page, video
+from support.engine import Fixture, SimulatedTransport, args_for, create, fixture_signing
 from test_migrations import legacy_database, backups, snapshot, assert_existing_data_preserved
 
 

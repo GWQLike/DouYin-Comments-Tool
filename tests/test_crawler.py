@@ -5,61 +5,18 @@ import asyncio
 import inspect
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import pytest
 
-from backend.crawler import Collector, ManualActionRequired, PageFailure, StopRequested, normalize_comment
 from backend.db import Database
 from backend.douyin_adapter import DouyinAdapter, video_id_from_url
+from backend.errors import ManualActionRequired, PageFailure, StopRequested
 from backend.identity import normalize_profile
-
-
-def comment(cid, *, user=None, replies=0, text="测试评论", stamp=1720000000):
-    return {"cid": cid, "text": text, "create_time": stamp, "ip_label": "广东",
-            "reply_comment_total": replies,
-            "user": user if user is not None else {"uid": "u1", "sec_uid": "s1", "unique_id": "public.one", "nickname": "测试用户"}}
-
-
-def page(rows, cursor=0, more=0):
-    return {"status_code": 0, "comments": rows, "cursor": cursor, "has_more": more}
-
-
-class FakeClient:
-    def __init__(self, main=None, replies=None, profiles=None):
-        self.main = main or {0: page([])}
-        self.replies = replies or {}
-        self.profiles = profiles or {}
-        self.calls = []
-        self.attempts = defaultdict(int)
-        self.manual_waits = 0
-
-    def response(self, mapping, key):
-        self.calls.append(key)
-        result = mapping[key]
-        if isinstance(result, list):
-            count = self.attempts[key]
-            result = result[min(count, len(result) - 1)]
-            self.attempts[key] += 1
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    async def get_aweme_comments(self, video_id, cursor):
-        return self.response(self.main, int(cursor))
-
-    async def get_sub_comments(self, video_id, parent_id, cursor):
-        return self.response(self.replies, (parent_id, int(cursor)))
-
-    async def get_user_info(self, sec_uid):
-        return self.response(self.profiles, sec_uid)
-
-    async def get_video_by_id(self, video_id):
-        return {"desc": "离线测试视频"}
-
-    async def wait_for_manual(self):
-        self.manual_waits += 1
+from backend.normalization import normalize_comment
+from baselines.comments import Collector
+from support.legacy_clients import FakeClient
+from support.payloads import comment, page
 
 
 @pytest.fixture

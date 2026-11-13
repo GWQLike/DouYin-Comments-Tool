@@ -9,15 +9,13 @@ import httpx
 import pytest
 
 from backend import migrations
-from backend.crawler import normalize_comment
+from backend.normalization import normalize_comment, normalize_liked_video
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
-from backend.likes import normalize_liked_video
 from backend.search import Filters, select_comments
 from backend.engine_tasks import CommentTask, LikesTask, RecommendationsTask
-from test_crawler import comment
-from test_engine_integration import SimulatedTransport, args_for, fixture_signing
-from test_likes_collector import video
+from support.payloads import comment, video
+from support.engine import SimulatedTransport, args_for, fixture_signing
 from test_migrations import backups, snapshot, assert_existing_data_preserved
 from test_comment_preservation import historical_v2
 

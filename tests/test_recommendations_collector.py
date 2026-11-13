@@ -5,24 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.activity import recommendation_time
 from backend.db import Database
 from backend.douyin_adapter import DouyinAdapter
-from backend.recommendations import RecommendationsCollector, recommendation_time
-from test_likes_collector import FakeLikesClient, likes, profile, video
-
-
-class FakeRecommendationsClient(FakeLikesClient):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.counts = []
-
-    async def get_user_likes(self, *args, **kwargs):
-        raise AssertionError('Recommendations must not request likes')
-
-    async def get_user_recommendations(self, sec_uid, cursor=0, count=18):
-        assert sec_uid == 'target_sec'
-        self.counts.append(count)
-        return self.response(self.pages, cursor, 'recommendations')
+from baselines.recommendations import RecommendationsCollector
+from support.legacy_clients import FakeRecommendationsClient
+from support.payloads import likes, profile, video
 
 
 def recommended(vid='1', action_at=1791267788, user=None, stamp=1720000000):

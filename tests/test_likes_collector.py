@@ -2,70 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
 
 import pytest
 
-from backend.crawler import ManualActionRequired, PageFailure, validate_response
+from backend.activity import profile_visibility
 from backend.db import Database
 from backend.douyin_adapter import DouyinAdapter
-from backend.likes import LikesCollector, normalize_liked_video, profile_visibility
-
-
-def profile(account="target.user", sec="target_sec", uid="target_uid", **kwargs):
-    return {"status_code": 0, "user": {"uid": uid, "sec_uid": sec, "unique_id": account,
-                                        "nickname": "目标昵称", **kwargs}}
-
-
-def video(vid="1", author=None, stamp=1720000000):
-    return {"aweme_id": vid, "desc": "测试视频标题\n原始文本", "create_time": stamp,
-            "author": author if author is not None else {"uid": "author_uid", "sec_uid": "author_sec",
-                                                          "unique_id": "author.one", "nickname": "视频作者"}}
-
-
-def likes(rows, cursor=0, more=0):
-    return {"status_code": 0, "aweme_list": rows, "max_cursor": cursor, "has_more": more}
-
-
-def users(rows, cursor=0, more=0):
-    return {"status_code": 0, "user_list": [{"user_info": user} for user in rows],
-            "cursor": cursor, "has_more": more}
-
-
-class FakeLikesClient:
-    def __init__(self, pages=None, search=None, target=None, profiles=None):
-        target = target if target is not None else profile(show_favorite_list=True)
-        self.pages = pages if pages is not None else {0: likes([])}
-        self.search = search if search is not None else {0: users([target["user"]])}
-        self.profiles = {"target_sec": target, **(profiles or {})}
-        self.calls = []
-        self.attempts = defaultdict(int)
-        self.manual_waits = 0
-
-    def response(self, mapping, key, family):
-        self.calls.append((family, key))
-        result = mapping[key]
-        if isinstance(result, list):
-            index = self.attempts[(family, key)]
-            self.attempts[(family, key)] += 1
-            result = result[min(index, len(result) - 1)]
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    async def search_users(self, account, offset=0, search_id=""):
-        assert account == "target.user"
-        return self.response(self.search, offset, "search")
-
-    async def get_user_info(self, sec_uid):
-        return self.response(self.profiles, sec_uid, "profile")
-
-    async def get_user_likes(self, sec_uid, cursor=0):
-        assert sec_uid == "target_sec"
-        return self.response(self.pages, cursor, "likes")
-
-    async def wait_for_manual(self):
-        self.manual_waits += 1
+from backend.errors import ManualActionRequired, PageFailure
+from backend.normalization import normalize_liked_video
+from baselines.comments import validate_response
+from baselines.likes import LikesCollector
+from support.legacy_clients import FakeLikesClient
+from support.payloads import likes, profile, users, video
 
 
 @pytest.fixture

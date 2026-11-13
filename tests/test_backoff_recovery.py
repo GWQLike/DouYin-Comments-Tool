@@ -7,10 +7,9 @@ import pytest
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
 from backend.stable_policy import StableRequestPolicy
-from test_crawler import comment, page
-from test_engine_integration import Fixture, SimulatedTransport, args_for, create, exported, fixture_signing
-from test_likes_collector import video, likes
-from test_stable_policy import Clock, policy
+from support.payloads import comment, likes, page, video
+from support.engine import Fixture, SimulatedTransport, args_for, create, exported, fixture_signing
+from support.pacing import Clock, policy
 
 
 def succeed(p, count):

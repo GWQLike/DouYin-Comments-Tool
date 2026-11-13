@@ -141,12 +141,3 @@ def test_invalid_target_recommendation_time_stays_unknown(stamp):
     raw = {'friend_recommend_info': {'label_user_list': [
         {'user': {'uid': '31'}, 'recommend_time': stamp}]}}
     assert recommendation_time(raw, {'uid': '31'}) is None
-
-
-def test_old_import_paths_reexport_the_same_functions():
-    from backend import activity, crawler, likes, normalization, recommendations
-    assert crawler._string is normalization._string
-    assert crawler.normalize_comment is normalize_comment
-    assert likes.normalize_liked_video is normalize_liked_video
-    assert likes.profile_visibility is activity.profile_visibility
-    assert recommendations.recommendation_time is activity.recommendation_time

@@ -9,12 +9,12 @@ from fastapi.testclient import TestClient
 from backend.app import WorkerManager, create_app
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
-from backend.likes import normalize_liked_video
+from backend.normalization import normalize_liked_video
 from backend.preflight import PreflightRejected
 from backend.responses import Kind, LoginRequired, classify_http
 from backend.upstream import module
-from test_engine_integration import Fixture, SimulatedTransport, args_for, create
-from test_likes_collector import likes, profile, users, video
+from support.engine import Fixture, SimulatedTransport, args_for, create
+from support.payloads import likes, profile, users, video
 from test_search_api import FakeManager
 
 
@@ -103,8 +103,8 @@ class DiscoveryFixture(Fixture):
 
 def seed_history(db):
     old = create(db, 'comments')
-    from backend.crawler import normalize_comment
-    from test_crawler import comment
+    from backend.normalization import normalize_comment
+    from support.payloads import comment
     db.save_page(old['id'], '', [normalize_comment(comment('hint', user={
         'uid': 'old_uid', 'sec_uid': 'old_sec', 'unique_id': 'target.user',
     }), '123456789')], 1, True)

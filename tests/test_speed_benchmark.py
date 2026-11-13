@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from backend.crawler import Collector
+from baselines.comments import Collector
 from backend.db import Database
 from backend.request_policy import RequestPolicy
 from backend.search import Filters, export_txt, select_comments

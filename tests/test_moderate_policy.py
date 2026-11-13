@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
 
-from test_stable_policy import Clock, policy
+from support.pacing import Clock, policy
 
 
 def successes(p, count):

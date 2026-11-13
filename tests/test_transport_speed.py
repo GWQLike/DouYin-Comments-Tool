@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from backend.crawler import ManualActionRequired, PageFailure, StopRequested
+from backend.errors import ManualActionRequired, PageFailure, StopRequested
 from backend.douyin_adapter import DouyinAdapter, load_upstream_client, pooled_client_type
 from backend.request_policy import RequestPolicy
 

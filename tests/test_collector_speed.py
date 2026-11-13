@@ -3,11 +3,12 @@ import asyncio
 
 import pytest
 
-from backend.crawler import Collector
+from baselines.comments import Collector
 from backend.db import Database
-from backend.likes import LikesCollector, normalize_liked_video
-from test_crawler import FakeClient, comment, page
-from test_likes_collector import FakeLikesClient, likes, video
+from baselines.likes import LikesCollector
+from backend.normalization import normalize_liked_video
+from support.legacy_clients import FakeClient, FakeLikesClient
+from support.payloads import comment, likes, page, video
 
 
 @pytest.mark.asyncio

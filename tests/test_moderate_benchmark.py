@@ -14,9 +14,8 @@ import pytest
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
 from backend.stable_policy import StableRequestPolicy
-from test_engine_integration import SimulatedTransport, args_for, create, exported, fixture_signing
-from test_crawler import comment, page
-from test_likes_collector import profile, video, likes, users
+from support.engine import SimulatedTransport, args_for, create, exported, fixture_signing
+from support.payloads import comment, likes, page, profile, users, video
 
 
 class FixedPolicy(StableRequestPolicy):

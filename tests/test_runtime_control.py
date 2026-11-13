@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from backend.app import WorkerManager, create_app
 from backend.browser_session import DedicatedBrowser
-from backend.crawler import PageFailure, StopRequested
+from backend.errors import PageFailure, StopRequested
 from backend.db import Database
 from backend.douyin_adapter import DouyinAdapter
 from backend.engine_tasks import CommentTask

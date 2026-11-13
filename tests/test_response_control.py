@@ -5,20 +5,19 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from backend.crawler import ManualActionRequired, PageFailure, normalize_comment
+from backend.errors import ManualActionRequired, PageFailure
+from backend.normalization import normalize_comment, normalize_liked_video
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
 from backend.engine_tasks import CommentTask
-from backend.likes import normalize_liked_video
 from backend.responses import (
     Kind, LoginRequired, NetworkPause, RequestFailure, RequestRejected,
     classify_http,
 )
 from backend.stable_policy import ProtectionPause
-from test_crawler import comment
-from test_engine_integration import Fixture, SimulatedTransport, args_for, create, fixture_signing
-from test_likes_collector import video
-from test_stable_policy import Clock, policy
+from support.payloads import comment, video
+from support.engine import Fixture, SimulatedTransport, args_for, create, fixture_signing
+from support.pacing import Clock, policy
 from test_transport_speed import adapter
 
 

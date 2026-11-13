@@ -11,8 +11,8 @@ from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
 from backend.engine_storage import CommentPages
 from backend.search import Filters, export_txt, select_comments
-from test_crawler import comment, page
-from test_engine_integration import Fixture, SimulatedTransport, args_for, fixture_signing
+from support.payloads import comment, page
+from support.engine import Fixture, SimulatedTransport, args_for, fixture_signing
 from test_migrations import backups, legacy_database, snapshot
 
 

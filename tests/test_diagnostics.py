@@ -89,7 +89,7 @@ async def test_periodic_startup_and_cancel(tmp_path, monkeypatch):
 def test_committed_page_counts_include_duplicates(tmp_path):
     from backend.db import Database
     from backend.engine_tasks import CommentTask
-    from backend.crawler import normalize_comment
+    from backend.normalization import normalize_comment
     db = Database(tmp_path/'db')
     task = db.create_task('https://www.douyin.com/video/123456789', '123456789')
     log = Diagnostics(tmp_path)
@@ -135,7 +135,7 @@ def test_forced_exit_preserves_last_phase(tmp_path):
     ('rate_limit', 'protection_wait_seconds', 60),
 ])
 async def test_wait_categories_are_disjoint(tmp_path, mode, expected, seconds):
-    from test_stable_policy import Clock, policy
+    from support.pacing import Clock, policy
     clock = Clock()
     p = policy(tmp_path/'control.json', clock)
     log = Diagnostics(tmp_path, clock=clock)
@@ -152,7 +152,7 @@ async def test_wait_categories_are_disjoint(tmp_path, mode, expected, seconds):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('kind', ['comments', 'likes', 'recommendations'])
 async def test_real_engine_diagnostic_totals(tmp_path, monkeypatch, kind):
-    from test_engine_integration import Fixture, SimulatedTransport, create, args_for
+    from support.engine import Fixture, SimulatedTransport, create, args_for
     from backend.db import Database
     from backend.engine import WorkbenchRuntime, run_engine
     from backend.upstream import module
@@ -176,7 +176,7 @@ async def test_real_engine_diagnostic_totals(tmp_path, monkeypatch, kind):
 @pytest.mark.asyncio
 async def test_retry_records_failure_once_in_actual_engine(tmp_path, monkeypatch):
     import httpx
-    from test_engine_integration import Fixture, SimulatedTransport, create, args_for
+    from support.engine import Fixture, SimulatedTransport, create, args_for
     from backend.db import Database
     from backend.engine import WorkbenchRuntime, run_engine
     from backend.upstream import module

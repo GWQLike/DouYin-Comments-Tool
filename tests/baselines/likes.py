@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from backend.errors import ManualActionRequired, PageFailure, StopRequested
-from backend.crawler import Collector, validate_response
+from .comments import Collector, validate_response
 from backend.identity import account_key, normalize_profile, public_number
 from backend.normalization import _string, normalize_liked_video
 from backend.activity import profile_visibility

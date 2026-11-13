@@ -5,15 +5,14 @@ import random
 import httpx
 import pytest
 
-from backend.crawler import ControlledStop
+from backend.errors import ControlledStop
 from backend.db import Database
 from backend.engine import WorkbenchRuntime, run_engine
 from backend.stable_policy import StableRequestPolicy
 from test_backoff_recovery import RecoveryFixture
-from test_crawler import comment, page
-from test_engine_integration import SimulatedTransport, args_for, create, exported, fixture_signing
-from test_likes_collector import video, likes
-from test_stable_policy import Clock, policy
+from support.payloads import comment, likes, page, video
+from support.engine import SimulatedTransport, args_for, create, exported, fixture_signing
+from support.pacing import Clock, policy
 from test_transport_speed import adapter
 
 
@@ -104,7 +103,7 @@ async def test_exhausted_budget_skips_wait_and_signature_but_preserves_last_resp
 
 async def test_stop_during_faster_wait_sends_no_next_request(tmp_path):
     import asyncio
-    from backend.crawler import StopRequested
+    from backend.errors import StopRequested
     clock = Clock()
     stopped = False
     def stop():
