@@ -226,7 +226,8 @@ async def test_stop_before_verification_starts_retains_collection_error(tmp_path
 @pytest.mark.parametrize('verify_only', [False, True])
 @pytest.mark.parametrize('stopping', [False, True])
 async def test_worker_login_during_verification_preserves_collection_error(tmp_path, monkeypatch, verify_only, stopping):
-    from backend.crawler import worker, StopRequested
+    from backend.errors import StopRequested
+    from backend.worker import worker
     db, tid = seed(tmp_path, 'comments', [{'uid': 'u', 'sec_uid': 's'}])
     args = SimpleNamespace(db=db.path, profile=str(tmp_path / 'profile'), task=tid, verify_only=verify_only)
     async def run(db, args, stop, waiting):
@@ -239,7 +240,7 @@ async def test_worker_login_during_verification_preserves_collection_error(tmp_p
         assert db.get_task(tid)['error'] == '保留的采集错误'
         raise StopRequested() if stopping else RuntimeError('fixture browser exit')
     monkeypatch.setattr('backend.engine.run_engine', run)
-    monkeypatch.setattr('backend.crawler.signal.signal', lambda *args: None)
+    monkeypatch.setattr('backend.worker.signal.signal', lambda *args: None)
     assert await worker(args) == (0 if stopping else 1)
     assert db.get_task(tid)['error'] == '保留的采集错误'
     assert db.get_checkpoint(tid)['cursor'] == 40
@@ -255,8 +256,8 @@ def test_manager_keeps_collection_error_on_verification_start_and_exit(tmp_path,
     manager.browser.ensure = Mock(return_value='http://127.0.0.1:9222')
     process = Mock()
     process.poll.return_value = None
-    monkeypatch.setattr('backend.app.subprocess.Popen',
-        Mock(side_effect=OSError('fixture spawn failure')) if launch_fails else Mock(return_value=process))
+    spawn = Mock(side_effect=OSError('fixture spawn failure')) if launch_fails else Mock(return_value=process)
+    monkeypatch.setattr('backend.app.subprocess.Popen', spawn)
     with ProcessLease(tmp_path, 'service') as owner:
         owner.identify()
         manager.owner = owner
@@ -266,6 +267,11 @@ def test_manager_keeps_collection_error_on_verification_start_and_exit(tmp_path,
             assert error.value.status_code == 500
         else:
             manager.start(tid, verify=True)
+            command, = spawn.call_args.args
+            assert command[1:3] == ['-m', 'backend.worker']
+            assert command[command.index('--service-token') + 1] == owner.token
+            assert command[command.index('--task') + 1] == tid
+            assert '--stop-pipe' in command and '--verify-only' in command
             assert db.get_task(tid)['error'] == '保留的采集错误'
             process.poll.return_value = 1
             assert not manager.check()

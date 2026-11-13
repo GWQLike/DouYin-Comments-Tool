@@ -30,7 +30,7 @@ class ForbidCollectors(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, ForbidCollectors())
 for name in ('errors', 'responses', 'preflight', 'stable_policy', 'browser_session',
              'douyin_adapter', 'engine', 'runtime_control', 'normalization', 'activity',
-             'identity', 'verification', 'engine_storage', 'engine_tasks'):
+             'identity', 'verification', 'engine_storage', 'engine_tasks', 'worker'):
     importlib.import_module('backend.' + name)
 assert not any(name.startswith('media_platform.') for name in sys.modules)
 ''')
@@ -103,8 +103,9 @@ runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
     assert 'upstream-private-body' not in str(saved) + result.stdout + result.stderr
 
 
+@pytest.mark.parametrize('entry', ['backend.worker', 'backend.crawler'])
 @pytest.mark.parametrize('case', ['unsupported_likes_range', 'already_stopped'])
-def test_actual_cli_preserves_checkpoint_before_platform_start(tmp_path, case):
+def test_actual_cli_preserves_checkpoint_before_platform_start(tmp_path, case, entry):
     db = Database(tmp_path / 'worker.sqlite3')
     unsupported = case == 'unsupported_likes_range'
     task = db.create_task('', kind='likes' if unsupported else 'comments',
@@ -119,7 +120,7 @@ def test_actual_cli_preserves_checkpoint_before_platform_start(tmp_path, case):
     checkpoint = db.get_checkpoint(task['id'], key)
     profile = tmp_path / 'profile'
     result = subprocess.run(
-        [sys.executable, '-m', 'backend.crawler', '--db', db.path,
+        [sys.executable, '-m', entry, '--db', db.path,
          '--profile', str(profile), '--task', task['id']],
         cwd=ROOT, capture_output=True, text=True, encoding='utf-8', timeout=15,
         env={**os.environ, 'PYTHONUTF8': '1'},

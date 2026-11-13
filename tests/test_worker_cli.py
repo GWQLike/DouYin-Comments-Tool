@@ -22,14 +22,14 @@ import types
 
 db_path, profile_path, task_id, status, exception = sys.argv[1:]
 async def run_engine(db, args, stop, waiting):
-    from backend import crawler
+    from backend import errors
     db.update_task(task_id, status=status, collection_complete=status == 'completed', error='已保存的结论')
-    raise getattr(crawler, exception)('迟到的退出异常')
+    raise getattr(errors, exception)('迟到的退出异常')
 engine = types.ModuleType('backend.engine')
 engine.run_engine = run_engine
 sys.modules[engine.__name__] = engine
-sys.argv = ['backend.crawler', '--db', db_path, '--profile', profile_path, '--task', task_id]
-runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+sys.argv = ['backend.worker', '--db', db_path, '--profile', profile_path, '--task', task_id]
+runpy.run_module('backend.worker', run_name='__main__', alter_sys=True)
 """
     db_path = tmp_path / 'worker.sqlite3'
     db = Database(db_path)
@@ -59,8 +59,8 @@ class ForbiddenAdapter:
 adapter = types.ModuleType('backend.douyin_adapter')
 adapter.DouyinAdapter = ForbiddenAdapter
 sys.modules[adapter.__name__] = adapter
-sys.argv = ['backend.crawler', '--db', db_path, '--profile', profile_path, '--task', task_id]
-runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+sys.argv = ['backend.worker', '--db', db_path, '--profile', profile_path, '--task', task_id]
+runpy.run_module('backend.worker', run_name='__main__', alter_sys=True)
 """
     db_path = tmp_path / 'worker.sqlite3'
     db = Database(db_path)
@@ -111,10 +111,10 @@ class FakeAdapter:
 adapter = types.ModuleType('backend.douyin_adapter')
 adapter.DouyinAdapter = FakeAdapter
 sys.modules[adapter.__name__] = adapter
-sys.argv = ['backend.crawler', '--db', db_path, '--profile', profile_path]
+sys.argv = ['backend.worker', '--db', db_path, '--profile', profile_path]
 if task_id:
     sys.argv.extend(['--task', task_id])
-runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+runpy.run_module('backend.worker', run_name='__main__', alter_sys=True)
 """
     root = Path(__file__).resolve().parents[1]
     db_path = tmp_path / "worker.sqlite3"
@@ -142,7 +142,9 @@ runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
             assert saved['error'] == 'safe startup reason'
 
 
-@pytest.mark.parametrize("task_kind,verify_only", [("comments", False), ("comments", True), ("likes", False)])
+@pytest.mark.parametrize("task_kind,verify_only", [
+    (None, False), ("comments", False), ("comments", True), ("likes", False), ("recommendations", False),
+])
 def test_cli_dispatches_task_kind_and_closes_context(tmp_path, task_kind, verify_only):
     code = """
 import runpy
@@ -151,7 +153,7 @@ import types
 
 db_path, profile_path, task_id, verify_only = sys.argv[1:]
 
-class FakeCollector:
+class FakeCommentTask:
     label = 'comments'
     def __init__(self, db, client, task_id, **kwargs):
         self.db, self.task_id = db, task_id
@@ -159,8 +161,11 @@ class FakeCollector:
         self.db.update_task(self.task_id, status='completed', collection_complete=True,
                             title=f'{self.label}:{verify}')
 
-class FakeLikesCollector(FakeCollector):
+class FakeLikesTask(FakeCommentTask):
     label = 'likes'
+
+class FakeRecommendationsTask(FakeCommentTask):
+    label = 'recommendations'
 
 class FakeAdapter:
     def __init__(self, profile, stop, waiting):
@@ -179,20 +184,23 @@ adapter = types.ModuleType('backend.douyin_adapter')
 adapter.DouyinAdapter = FakeAdapter
 sys.modules[adapter.__name__] = adapter
 extensions = types.ModuleType('backend.engine_tasks')
-extensions.CommentTask = FakeCollector
-extensions.LikesTask = extensions.RecommendationsTask = FakeLikesCollector
+extensions.CommentTask = FakeCommentTask
+extensions.LikesTask = FakeLikesTask
+extensions.RecommendationsTask = FakeRecommendationsTask
 sys.modules[extensions.__name__] = extensions
-sys.argv = ['backend.crawler', '--db', db_path, '--profile', profile_path, '--task', task_id]
+sys.argv = ['backend.worker', '--db', db_path, '--profile', profile_path]
+if task_id:
+    sys.argv.extend(['--task', task_id])
 if verify_only == 'True':
     sys.argv.append('--verify-only')
-runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+runpy.run_module('backend.worker', run_name='__main__', alter_sys=True)
 """
     root = Path(__file__).resolve().parents[1]
     db_path = tmp_path / "worker.sqlite3"
     db = Database(db_path)
-    task = db.create_task('', kind=task_kind, target_account='test.account')
+    task = db.create_task('', kind=task_kind, target_account='test.account') if task_kind else None
     result = subprocess.run(
-        [sys.executable, '-c', code, str(db_path), str(tmp_path / 'profile'), task['id'], str(verify_only)],
+        [sys.executable, '-c', code, str(db_path), str(tmp_path / 'profile'), task['id'] if task else '', str(verify_only)],
         cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=15,
         env={**os.environ, 'PYTHONUTF8': '1'},
     )
@@ -203,7 +211,8 @@ runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
     assert timing['startup_seconds'] >= 0 and timing['collection_seconds'] >= 0
     assert timing['worker_elapsed_seconds'] == pytest.approx(
         timing['startup_seconds'] + timing['collection_seconds'], abs=.002)
-    saved = db.get_task(task['id'])
-    assert saved['status'] == 'completed'
-    assert saved['title'] == f'{task_kind}:{verify_only}'
+    if task:
+        saved = db.get_task(task['id'])
+        assert saved['status'] == 'completed'
+        assert saved['title'] == f'{task_kind}:{verify_only}'
     assert db.session_get()['status'] == 'ready'

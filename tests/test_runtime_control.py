@@ -75,9 +75,9 @@ async def run_engine(db, args, stop, waiting):
 engine = types.ModuleType('backend.engine')
 engine.run_engine = run_engine
 sys.modules[engine.__name__] = engine
-sys.argv = ['backend.crawler', '--db', str(directory / 'comments.sqlite3'),
+sys.argv = ['backend.worker', '--db', str(directory / 'comments.sqlite3'),
     '--profile', str(directory / 'profile'), '--task', task_id, '--service-token', token]
-runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+runpy.run_module('backend.worker', run_name='__main__', alter_sys=True)
 '''
 
 
@@ -190,9 +190,9 @@ def test_cli_cannot_join_another_service(tmp_path, token):
     code = '''
 import runpy,sys
 directory,token=sys.argv[1:]
-sys.argv=['backend.crawler','--db',directory+'/comments.sqlite3','--profile',directory+'/profile']
+sys.argv=['backend.worker','--db',directory+'/comments.sqlite3','--profile',directory+'/profile']
 if token: sys.argv += ['--service-token',token]
-runpy.run_module('backend.crawler',run_name='__main__',alter_sys=True)
+runpy.run_module('backend.worker',run_name='__main__',alter_sys=True)
 '''
     with ProcessLease(tmp_path, 'service') as owner:
         owner.identify()
@@ -379,10 +379,10 @@ async def run_engine(db, args, stop, waiting):
 engine = types.ModuleType('backend.engine')
 engine.run_engine = run_engine
 sys.modules[engine.__name__] = engine
-sys.argv = ['backend.crawler', '--db', str(directory / 'comments.sqlite3'),
+sys.argv = ['backend.worker', '--db', str(directory / 'comments.sqlite3'),
     '--profile', str(directory / 'profile'), '--service-token', token, '--stop-pipe']
 if task_id: sys.argv += ['--task', task_id]
-runpy.run_module('backend.crawler', run_name='__main__', alter_sys=True)
+runpy.run_module('backend.worker', run_name='__main__', alter_sys=True)
 '''
     db = Database(tmp_path / 'comments.sqlite3')
     tid = db.create_task('')['id'] if task_run else ''

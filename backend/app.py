@@ -125,7 +125,7 @@ class WorkerManager:
                 self.db.transition_task(task_id, 'start', verify_only=verify, stop_requested=False)
             else:
                 self.db.session_set('waiting')
-            command = [sys.executable, '-m', 'backend.crawler', '--db', self.db.path, '--profile', str(self.data_dir / 'chrome-profile')]
+            command = [sys.executable, '-m', 'backend.worker', '--db', self.db.path, '--profile', str(self.data_dir / 'chrome-profile')]
             command += ['--service-token', self.owner.token, '--stop-pipe']
             if task_id:
                 command += ['--task', task_id]
