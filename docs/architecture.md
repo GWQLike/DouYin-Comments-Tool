@@ -6,7 +6,7 @@
 
 1. 页面提交视频链接或公开抖音号。FastAPI 检查采集条件，再创建任务并记录数量和时间范围。当前不支持的点赞时间条件在创建、启动和内核入口检查，避免为已知无法完成的任务请求平台。
 2. 服务进程管理专用 Chrome，采集 worker 通过 MediaCrawler 的 CDP 管理器连接。使用独立资料目录，任务结束只断开连接，窗口供后续任务复用。
-3. worker 进入 `backend.engine.run_engine`，调用 `DouYinCrawler(runtime=...).start()`。运行时适配器接入登录、任务分发和本地存储。
+3. 服务启动 `backend.worker`，取得进程锁并接入停止信号后，进入 `backend.engine.run_engine`，调用 `DouYinCrawler(runtime=...).start()`。运行时适配器接入登录、任务分发和本地存储。
 4. 评论通过内核客户端读取主评论和每条评论的回复；喜欢、推荐通过内核扩展分页。账号与作者资料核实共用客户端和会话。结果作者的资料补齐为可选步骤，新任务默认关闭；目标账号的定位与权限检查仍会执行。
 5. 分页回调先归一字段，再把该页数据和下一页游标写入同一个 SQLite 事务。中断后从已提交的断点继续。
 6. 页面查询和 TXT 导出读取 SQLite。评论无关键词时在数据库筛选、分页；有关键词时首次分批匹配，后续同条件查询复用匹配 ID，只读取当前页。页面根据任务更新时间刷新。关键词匹配使用归一后的搜索副本，展示和导出保留原文。
@@ -18,16 +18,22 @@
 | MediaCrawler 主引擎 | `vendor/MediaCrawler/media_platform/douyin/core.py`：生命周期、登录与分页入口 |
 | MediaCrawler 客户端 | `client.py`、`help.py`：请求准备与签名；签名算法保持固定版本 |
 | 兼容补丁 | `vendor/patches`：显式运行时接口、分页回调、断点、人工登录回调、CDP 附着 |
+| worker 入口 | `backend/worker.py`：命令行参数、进程所有权、停止信号和引擎调用 |
 | 本地运行时 | `backend/engine.py`：调用引擎、共享会话和任务分发 |
-| 功能扩展 | `backend/engine_tasks.py`：评论任务、喜欢、推荐、作者身份核实 |
-| 存储适配 | `backend/engine_storage.py`、`db.py`：字段归一、逐页提交和断点 |
+| 功能扩展 | `backend/engine_tasks.py`：评论、喜欢、推荐任务及核实步骤的调度 |
+| 数据标准化 | `backend/normalization.py`：评论、回复和视频字段；`activity.py`：列表可见性与目标账号的推荐时间 |
+| 作者身份 | `backend/identity.py`：账号匹配和主页身份比对；`verification.py`：逐条核实、原始资料复用及核实状态持久化 |
+| 基础异常 | `backend/errors.py`：请求、人工验证和停止使用的共用异常类型 |
+| 存储适配 | `backend/engine_storage.py`、`db.py`：原始页回调、逐页事务和断点 |
 | 任务统计 | `backend/task_stats.py`：随数据事务维护数量、待核实作者及结果版本；`check_stats.py` 提供离线检查和重建 |
 | 任务状态 | `backend/task_state.py`：统一启动、登录等待、完成、停止和异常退出的状态转换 |
 | 请求与会话 | `backend/responses.py` 统一响应分类；`douyin_adapter.py`、`stable_policy.py`、`browser_session.py` 处理请求、节奏与会话 |
 | 搜索与导出 | `backend/search.py` 负责匹配和格式，`backend/exports.py` 分批生成及发送 TXT；前端只发送筛选条件和展示结果 |
 | 关键词缓存 | `backend/search_cache.py`：服务进程内保存有序匹配 ID、匹配类型及分数，按任务结果版本失效 |
 
-旧采集器保留作回归比较，生产入口不会在新内核失败时回退。喜欢与个人主页推荐是本项目扩展，不是上游已有的完整采集模式。
+历史评论、喜欢和推荐采集器存放在 `tests/baselines`，模拟响应、传输和虚拟时钟存放在 `tests/support`。生产模块使用独立的标准化和身份模块。`backend/crawler.py` 为旧命令保留入口，转发到 `backend.worker`。
+
+喜欢与个人主页推荐由本项目扩展接入内核。集成测试在独立进程中禁止导入历史采集器，确认三类任务执行固定 MediaCrawler 的主引擎、客户端和分页方法；结果与 TXT 另有手写预期核对。
 
 固定上游版本为 `5d547f45862ca2d4b404e5a51775879d579b29d4`，补丁版本为 `workbench.2`。启动前校验七个变更文件的字节哈希。仓库因此保留这些文件的原始换行形式，避免 Windows 检出时改变校验结果。
 
