@@ -35,6 +35,8 @@ try {
     Invoke-Checked 'uv.exe' @('sync', '--frozen', '--python', '3.12', '--extra', 'dev')
 
     $projectPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+    Write-Host '读取应用版本...'
+    Invoke-Checked $projectPython @('-m', 'backend.version')
     Write-Host '检查 MediaCrawler 内核及已安装的 Google Chrome...'
     Invoke-Checked $projectPython @('-m', 'backend.check_engine')
 

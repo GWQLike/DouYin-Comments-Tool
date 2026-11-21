@@ -24,6 +24,7 @@ from .search_cache import KeywordMatchCache
 from .task_state import ACTIVE
 from .runtime_control import ProcessLease, OwnershipError, owner_alive, POLL_SECONDS
 from .urls import parse_input
+from .version import read_app_version
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -215,6 +216,7 @@ def query_filters(account: str = Query('', max_length=128), keyword: str = Query
 
 
 def create_app(data_dir=None, manager_factory=WorkerManager):
+    app_version = read_app_version()
     data_dir = Path(data_dir or os.environ.get('DOUYIN_DATA_DIR', ROOT / 'data')).resolve()
     db = manager = None
 
@@ -252,7 +254,7 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
                     finally:
                         db.keyword_cache.clear()
 
-    app = FastAPI(title='抖音评论检索工作台', lifespan=lifespan)
+    app = FastAPI(title='抖音评论检索工作台', version=app_version, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
 
     @app.middleware('http')
