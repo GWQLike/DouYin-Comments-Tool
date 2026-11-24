@@ -51,6 +51,9 @@ try {
         Pop-Location
     }
 
+    Write-Host '生成应用构建信息...'
+    Invoke-Checked $projectPython @('-m', 'backend.build_info', 'write')
+
     Write-Host ''
     Write-Host '初始化完成。双击“启动工具.cmd”即可使用。' -ForegroundColor Green
     exit 0

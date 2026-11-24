@@ -25,6 +25,7 @@ from .task_state import ACTIVE
 from .runtime_control import ProcessLease, OwnershipError, owner_alive, POLL_SECONDS
 from .urls import parse_input
 from .version import read_app_version
+from .build_info import BuildError, read_build_info
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -215,7 +216,8 @@ def query_filters(account: str = Query('', max_length=128), keyword: str = Query
         raise HTTPException(400, str(e)) from None
 
 
-def create_app(data_dir=None, manager_factory=WorkerManager):
+def create_app(data_dir=None, manager_factory=WorkerManager, *, build_loader=None):
+    """Create an API instance with an optional deployment metadata loader."""
     app_version = read_app_version()
     data_dir = Path(data_dir or os.environ.get('DOUYIN_DATA_DIR', ROOT / 'data')).resolve()
     db = manager = None
@@ -223,6 +225,11 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
     @asynccontextmanager
     async def lifespan(app):
         nonlocal db, manager
+        if build_loader is not None:
+            build_info = build_loader(ROOT)
+            if build_info.app_version != app_version:
+                raise BuildError('应用版本在启动前发生变化，请正常重启工具。')
+            app.state.build_info = build_info
         with ProcessLease(data_dir, 'service') as owner:
             owner.identify()
             # Old workers must release their OS lock before migrations or
@@ -471,7 +478,9 @@ def create_app(data_dir=None, manager_factory=WorkerManager):
     return app
 
 
-app = create_app()
+# The deployed instance requires a validated bundle. The factory also supports
+# API tests and embedded callers that inject their own startup dependencies.
+app = create_app(build_loader=read_build_info)
 
 if __name__ == '__main__':
     import uvicorn
